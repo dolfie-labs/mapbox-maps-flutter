@@ -14,6 +14,10 @@ final class NativeRiggedModelProbe {
   Future<void> attachRiggedModel(NativeRiggedModelProbeOptions options) =>
       _impl.attachRiggedModel(options);
 
+  /// Updates native placement and optional playback state without a GLB reload.
+  Future<void> updateRiggedModel(NativeRiggedModelProbeUpdate update) =>
+      _impl.updateRiggedModel(update);
+
   Future<void> setPaused(bool paused) => _impl.setPaused(paused);
   Future<void> detach() => _impl.detach();
   Future<NativeRiggedModelProbeDiagnostics> getDiagnostics() =>

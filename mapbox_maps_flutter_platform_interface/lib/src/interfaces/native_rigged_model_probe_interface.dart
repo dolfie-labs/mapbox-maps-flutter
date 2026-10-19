@@ -10,6 +10,10 @@ abstract interface class NativeRiggedModelProbePlatformInterface {
   /// Replaces an existing cube or model on this map.
   Future<void> attachRiggedModel(NativeRiggedModelProbeOptions options);
 
+  /// Updates cached placement/clip state without re-decoding the model.
+  /// Fails with MODEL_NOT_ATTACHED until a model has been accepted.
+  Future<void> updateRiggedModel(NativeRiggedModelProbeUpdate update);
+
   /// Controls the current cube or model on this map.
   Future<void> setPaused(bool paused);
 

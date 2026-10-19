@@ -65,8 +65,12 @@ internal class AnimatedEntitiesController(
         return
       }
       if (previousFrameNanos != 0L) {
-        val elapsed = rigged.get()?.elapsedNanos ?: cube.get()?.elapsedNanos
-        elapsed?.addAndGet(frameTimeNanos - previousFrameNanos)
+        val model = rigged.get()
+        if (model != null) {
+          if (!paused) model.advanceAnimation(frameTimeNanos - previousFrameNanos)
+        } else {
+          cube.get()?.elapsedNanos?.addAndGet(frameTimeNanos - previousFrameNanos)
+        }
       }
       previousFrameNanos = frameTimeNanos
       mapboxMap.triggerRepaint()
@@ -165,6 +169,10 @@ internal class AnimatedEntitiesController(
           result.success(null)
         }
         "attachRiggedModel" -> attachRiggedModel(arguments, result)
+        "updateRiggedModel" -> {
+          updateRiggedModel(arguments)
+          result.success(null)
+        }
         "getRiggedModelDiagnostics" -> result.success(riggedDiagnostics())
         "setPaused" -> {
           paused = readPaused(arguments)
@@ -314,6 +322,30 @@ internal class AnimatedEntitiesController(
     loadResult = null
   }
 
+  private fun updateRiggedModel(arguments: Map<*, *>) {
+    val model = rigged.get() ?: throw GlbException("MODEL_NOT_ATTACHED")
+    fun number(key: String): Double {
+      val value = arguments[key]
+      require(value is Double && value.isFinite())
+      return value
+    }
+    val latitude = number("latitude")
+    val longitude = number("longitude")
+    val heading = number("headingDegrees")
+    require(latitude in -MERCATOR_LATITUDE_LIMIT..MERCATOR_LATITUDE_LIMIT && longitude in -180.0..180.0)
+    val clip = if (arguments.containsKey("clipIndex")) {
+      val value = arguments["clipIndex"]
+      require(value is Int || value is Long)
+      val index = (value as Number).toLong()
+      require(index in 0 until model.model.clips.size.toLong())
+      index.toInt()
+    } else null
+    val rate = if (arguments.containsKey("playbackRate")) number("playbackRate").also { require(it in 0.0..4.0) } else null
+    if (model.update(latitude, longitude, heading, clip, rate)) previousFrameNanos = 0L
+    updateRepaint()
+    mapboxMap.triggerRepaint()
+  }
+
   private fun hasActiveProbe(): Boolean = cube.get() != null || rigged.get() != null
 
   private fun ownsCurrentStyleHost(): Boolean =
@@ -364,8 +396,9 @@ internal class AnimatedEntitiesController(
   }
 
   private fun canRepaint(): Boolean =
-    !disposed && viewAttached && !paused && hasActiveProbe() &&
-      ((rigged.get()?.playbackRate ?: 0.0) > 0.0 || (cube.get()?.rotationDegreesPerSecond ?: 0.0) != 0.0) &&
+    !disposed && viewAttached && hasActiveProbe() &&
+      (rigged.get()?.let { (!paused && it.playbackRate > 0.0) || it.needsPlacementFrame() }
+        ?: (!paused && (cube.get()?.rotationDegreesPerSecond ?: 0.0) != 0.0)) &&
       lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) == true &&
       ownsCurrentStyleHost() && host?.lastErrorCode?.get() == null && lastErrorCode == null &&
       mapboxMap.isStyleLoaded() && mapboxMap.styleManager.styleLayerExists(LAYER_ID)

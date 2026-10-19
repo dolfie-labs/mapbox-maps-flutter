@@ -14,6 +14,7 @@
 | Experimental API | iOS `@_spi(Experimental) CustomLayerHost` |
 | Native cube build / runtime | Android APK + iOS Simulator SPM build **PASS**; cube runtime **PASS** on Android emulator and iOS Simulator |
 | glTF skeletal renderer | **IMPLEMENTED** for the bounded P0C subset; visible GPU pose A/B verified on Android emulator and iOS Simulator only |
+| Home character support | Cached placement/clip updates, 500 ms native interpolation and bounded embedded base-color textures; original Fox Survey/Walk/Run verified on GLES/Metal simulators |
 
 This draft was authored from the user's checked-out baseline. The generated
 Pigeon schemas/bindings, original channels, package versions, web backend and

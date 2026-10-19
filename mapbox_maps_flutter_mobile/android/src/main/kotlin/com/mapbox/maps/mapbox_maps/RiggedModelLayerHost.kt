@@ -16,32 +16,94 @@ import kotlin.math.sin
 
 internal class RiggedModelState(
   val model: RiggedGlbModel,
-  val latitude: Double,
-  val longitude: Double,
+  latitude: Double,
+  longitude: Double,
   val altitudeMeters: Double,
   val heightMeters: Double,
-  val headingDegrees: Double,
-  val clipIndex: Int,
-  val playbackRate: Double,
+  headingDegrees: Double,
+  clipIndex: Int,
+  playbackRate: Double,
 ) {
-  val elapsedNanos = AtomicLong()
   val renderedFrames = AtomicLong()
   val poseRevision = AtomicLong()
   val evaluator = RiggedPoseEvaluator(model)
-  @Volatile var animationTimeSeconds = 0.0
+  private val playback = AtomicReference(RiggedPlayback(clipIndex, playbackRate, 0.0))
+  private val initialPlacement = RiggedPlacement(latitude, longitude, normalizeHeading(headingDegrees))
+  private val placement = AtomicReference(RiggedPlacementTransition(initialPlacement, initialPlacement, 0L))
+  private val settledPlacement = AtomicReference(placement.get())
+  val clipIndex get() = playback.get().clipIndex
+  val playbackRate get() = playback.get().rate
+  val animationTimeSeconds get() = playback.get().seconds
+
+  fun playbackSnapshot(): RiggedPlayback = playback.get()
+
+  fun advanceAnimation(deltaNanos: Long) {
+    while (true) {
+      val previous = playback.get()
+      val seconds = (previous.seconds + deltaNanos.toDouble() / 1_000_000_000.0 * previous.rate) % model.clips[previous.clipIndex].duration
+      if (playback.compareAndSet(previous, previous.copy(seconds = seconds))) return
+    }
+  }
+
+  /** Main-thread command, with atomic publication to Mapbox's render thread. */
+  fun update(latitude: Double, longitude: Double, heading: Double, clip: Int?, rate: Double?): Boolean {
+    val previous = playback.get()
+    val nextClip = clip ?: previous.clipIndex
+    val changedClip = nextClip != previous.clipIndex
+    playback.set(RiggedPlayback(nextClip, rate ?: previous.rate, if (changedClip) 0.0 else previous.seconds))
+    val target = RiggedPlacement(latitude, longitude, normalizeHeading(heading))
+    val previousPlacement = placement.get()
+    if (target != previousPlacement.to) {
+      val now = System.nanoTime()
+      placement.set(RiggedPlacementTransition(previousPlacement.sample(now), target, now))
+    }
+    return changedClip
+  }
+
+  fun needsPlacementFrame(): Boolean = settledPlacement.get() !== placement.get()
+
+  fun samplePlacement(now: Long): RiggedPlacement {
+    val transition = placement.get()
+    val sampled = transition.sample(now)
+    if (now - transition.startedNanos >= PLACEMENT_DURATION_NANOS) settledPlacement.set(transition)
+    return sampled
+  }
+
+  private companion object {
+    fun normalizeHeading(value: Double): Double = ((value % 360.0) + 360.0) % 360.0
+  }
+}
+
+internal data class RiggedPlayback(val clipIndex: Int, val rate: Double, val seconds: Double)
+internal data class RiggedPlacement(val latitude: Double, val longitude: Double, val headingDegrees: Double)
+private const val PLACEMENT_DURATION_NANOS = 500_000_000L
+private data class RiggedPlacementTransition(val from: RiggedPlacement, val to: RiggedPlacement, val startedNanos: Long) {
+  fun sample(now: Long): RiggedPlacement {
+    if (startedNanos == 0L) return to
+    val fraction = ((now - startedNanos).toDouble() / PLACEMENT_DURATION_NANOS).coerceIn(0.0, 1.0)
+    val longitude = from.longitude + shortestArc(to.longitude - from.longitude) * fraction
+    return RiggedPlacement(
+      from.latitude + (to.latitude - from.latitude) * fraction,
+      ((longitude + 540.0) % 360.0) - 180.0,
+      ((from.headingDegrees + shortestArc(to.headingDegrees - from.headingDegrees) * fraction) % 360.0 + 360.0) % 360.0,
+    )
+  }
+  private fun shortestArc(value: Double): Double = ((value + 540.0) % 360.0) - 180.0
 }
 
 /** One real skinned mesh in Mapbox's render pass; no model/viewer surface. */
 internal class RiggedModelLayerHost(
   private val active: AtomicReference<RiggedModelState?>,
   private val state: RiggedModelState,
-) : ProbeGlesHost("MoveyRiggedProbe") {
+) : ProbeGlesHost("MoveyRiggedProbe", capturesTextureState = true) {
   private var program = 0
   private val buffers = IntArray(2)
   private val vertexArray = IntArray(1)
+  private val textures = IntArray(1)
   private var matrixLocation = -1
   private var jointsLocation = -1
   private var colorLocation = -1
+  private var textureLocation = -1
   private val modelMatrix = DoubleArray(16)
   private val finalMatrix = FloatArray(16)
 
@@ -52,12 +114,13 @@ internal class RiggedModelLayerHost(
     observeIncomingGlError("initialize")
     if (!captureGlState("STATE_CAPTURE")) return
     try {
-      program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER, listOf("a_position", "a_joints", "a_weights"))
+      program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER, listOf("a_position", "a_joints", "a_weights", "a_texcoord"))
       checkGl("PROGRAM")
       matrixLocation = GLES20.glGetUniformLocation(program, "u_matrix")
       jointsLocation = GLES20.glGetUniformLocation(program, "u_joints[0]")
       colorLocation = GLES20.glGetUniformLocation(program, "u_color")
-      checkGpu(matrixLocation >= 0 && jointsLocation >= 0 && colorLocation >= 0, "GLES_SHADER_INTERFACE_INVALID")
+      textureLocation = GLES20.glGetUniformLocation(program, "u_texture")
+      checkGpu(matrixLocation >= 0 && jointsLocation >= 0 && colorLocation >= 0 && textureLocation >= 0, "GLES_SHADER_INTERFACE_INVALID")
       GLES20.glGenBuffers(2, buffers, 0)
       GLES30.glGenVertexArrays(1, vertexArray, 0)
       checkGpu(buffers.all { it != 0 } && vertexArray[0] != 0, "GLES_BUFFER_CREATION_FAILED")
@@ -68,6 +131,7 @@ internal class RiggedModelLayerHost(
         vertices.put(model.positions, vertex * 3, 3)
         for (axis in 0..3) vertices.put(model.joints[vertex * 4 + axis].toFloat())
         vertices.put(model.weights, vertex * 4, 4)
+        vertices.put(model.texCoords, vertex * 2, 2)
       }
       vertices.position(0)
       val indices = ByteBuffer.allocateDirect(model.indices.size * Int.SIZE_BYTES).order(ByteOrder.nativeOrder()).asIntBuffer()
@@ -84,7 +148,10 @@ internal class RiggedModelLayerHost(
       GLES20.glVertexAttribPointer(1, 4, GLES20.GL_FLOAT, false, STRIDE, 3 * Float.SIZE_BYTES)
       GLES20.glEnableVertexAttribArray(2)
       GLES20.glVertexAttribPointer(2, 4, GLES20.GL_FLOAT, false, STRIDE, 7 * Float.SIZE_BYTES)
+      GLES20.glEnableVertexAttribArray(3)
+      GLES20.glVertexAttribPointer(3, 2, GLES20.GL_FLOAT, false, STRIDE, 11 * Float.SIZE_BYTES)
       checkGl("VERTEX_ATTRIBUTES")
+      uploadTexture(model.texture)
       initialized.set(true)
     } catch (error: GpuException) {
       recordFailure(error.code)
@@ -102,10 +169,10 @@ internal class RiggedModelLayerHost(
     if (active.get() !== state || !initialized.get() || lastErrorCode.get() != null) return
     observeIncomingGlError("render")
     try {
-      val clip = state.model.clips[state.clipIndex]
-      val time = (state.elapsedNanos.get().toDouble() / 1_000_000_000.0 * state.playbackRate) % clip.duration
+      val playback = state.playbackSnapshot()
+      val clip = state.model.clips[playback.clipIndex]
+      val time = playback.seconds
       if (state.evaluator.evaluate(clip, time)) state.poseRevision.incrementAndGet()
-      state.animationTimeSeconds = time
       if (!prepareMatrix(parameters)) return
     } catch (error: GlbException) {
       recordFailure(error.code)
@@ -130,6 +197,10 @@ internal class RiggedModelLayerHost(
       GLES20.glUniformMatrix4fv(matrixLocation, 1, false, finalMatrix, 0)
       GLES20.glUniformMatrix4fv(jointsLocation, state.model.jointNodes.size, false, state.evaluator.palette, 0)
       GLES20.glUniform4fv(colorLocation, 1, state.model.color, 0)
+      GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+      GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0])
+      GLES30.glBindSampler(0, 0)
+      GLES20.glUniform1i(textureLocation, 0)
       GLES20.glDrawElements(GLES20.GL_TRIANGLES, state.model.indices.size, GLES20.GL_UNSIGNED_INT, 0)
       checkGl("SKINNED_DRAW")
       drew = true
@@ -145,12 +216,13 @@ internal class RiggedModelLayerHost(
 
   private fun prepareMatrix(parameters: CustomLayerRenderParameters): Boolean {
     val bounds = state.model.restBounds
+    val placement = state.samplePlacement(System.nanoTime())
     val scale = state.heightMeters / bounds[3]
-    val pixelsPerMeter = 1.0 / Projection.getMetersPerPixelAtLatitude(state.latitude, parameters.zoom)
-    val heightScale = Projection.getLatitudeScale(parameters.latitude) / Projection.getLatitudeScale(state.latitude)
-    val mercator = Projection.latLngToMercatorXY(Point.fromLngLat(state.longitude, state.latitude))
+    val pixelsPerMeter = 1.0 / Projection.getMetersPerPixelAtLatitude(placement.latitude, parameters.zoom)
+    val heightScale = Projection.getLatitudeScale(parameters.latitude) / Projection.getLatitudeScale(placement.latitude)
+    val mercator = Projection.latLngToMercatorXY(Point.fromLngLat(placement.longitude, placement.latitude))
     val worldSize = Projection.worldSize(2.0.pow(parameters.zoom))
-    val angle = (state.headingDegrees % 360.0) * PI / 180.0
+    val angle = (placement.headingDegrees % 360.0) * PI / 180.0
     val cosine = cos(angle)
     val sine = sin(angle)
     val xy = scale * pixelsPerMeter
@@ -182,6 +254,7 @@ internal class RiggedModelLayerHost(
     program = 0
     buffers.fill(0)
     vertexArray[0] = 0
+    textures[0] = 0
   }
 
   override fun deinitialize() { initialized.set(false); deleteResources() }
@@ -189,33 +262,63 @@ internal class RiggedModelLayerHost(
   private fun deleteResources() {
     if (vertexArray[0] != 0) GLES30.glDeleteVertexArrays(1, vertexArray, 0)
     GLES20.glDeleteBuffers(2, buffers, 0)
+    GLES20.glDeleteTextures(1, textures, 0)
     if (program != 0) GLES20.glDeleteProgram(program)
     buffers.fill(0)
     vertexArray[0] = 0
     program = 0
+    textures[0] = 0
+  }
+
+  private fun uploadTexture(texture: RigTexture?) {
+    GLES20.glGenTextures(1, textures, 0)
+    checkGpu(textures[0] != 0, "GLES_TEXTURE_CREATION_FAILED")
+    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0])
+    GLES30.glBindSampler(0, 0)
+    GLES20.glBindBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER, 0)
+    GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 4)
+    GLES20.glPixelStorei(GLES30.GL_UNPACK_ROW_LENGTH, 0)
+    GLES20.glPixelStorei(GLES30.GL_UNPACK_SKIP_ROWS, 0)
+    GLES20.glPixelStorei(GLES30.GL_UNPACK_SKIP_PIXELS, 0)
+    val minFilter = texture?.minFilter ?: GLES20.GL_LINEAR
+    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, minFilter)
+    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, texture?.magFilter ?: GLES20.GL_LINEAR)
+    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, texture?.wrapS ?: GLES20.GL_CLAMP_TO_EDGE)
+    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, texture?.wrapT ?: GLES20.GL_CLAMP_TO_EDGE)
+    val rgba = texture?.rgba ?: byteArrayOf(-1, -1, -1, -1)
+    val pixels = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder()).apply { put(rgba); position(0) }
+    GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, texture?.width ?: 1, texture?.height ?: 1, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
+    if (minFilter in GLES20.GL_NEAREST_MIPMAP_NEAREST..GLES20.GL_LINEAR_MIPMAP_LINEAR) GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
+    checkGl("TEXTURE_UPLOAD")
   }
 
   private companion object {
-    const val STRIDE = 11 * Float.SIZE_BYTES
+    const val STRIDE = 13 * Float.SIZE_BYTES
     val VERTEX_SHADER = """
       uniform mat4 u_matrix;
       uniform mat4 u_joints[32];
       attribute vec3 a_position;
       attribute vec4 a_joints;
       attribute vec4 a_weights;
+      attribute vec2 a_texcoord;
+      varying highp vec2 v_texcoord;
       void main() {
         mat4 skin = a_weights.x * u_joints[int(a_joints.x)]
                   + a_weights.y * u_joints[int(a_joints.y)]
                   + a_weights.z * u_joints[int(a_joints.z)]
                   + a_weights.w * u_joints[int(a_joints.w)];
         gl_Position = u_matrix * skin * vec4(a_position, 1.0);
+        v_texcoord = a_texcoord;
       }
     """.trimIndent()
-    // Intentional unlit base-color subset, including no texture/PBR approximation.
+    // Intentional unlit base-color factor/texture subset; no PBR approximation.
     val FRAGMENT_SHADER = """
       precision mediump float;
       uniform vec4 u_color;
-      void main() { gl_FragColor = vec4(u_color.rgb, 1.0); }
+      uniform sampler2D u_texture;
+      varying highp vec2 v_texcoord;
+      void main() { gl_FragColor = vec4(u_color.rgb * texture2D(u_texture, v_texcoord).rgb, 1.0); }
     """.trimIndent()
   }
 }

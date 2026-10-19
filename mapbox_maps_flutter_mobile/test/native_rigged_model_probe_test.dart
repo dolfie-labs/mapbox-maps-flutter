@@ -102,6 +102,70 @@ void main() {
   );
 
   test(
+    'updates cached model state and omits unspecified clip and rate fields',
+    () async {
+      await map.nativeRiggedModelProbe.updateRiggedModel(
+        NativeRiggedModelProbeUpdate(
+          latitude: 10,
+          longitude: 106,
+          headingDegrees: 359,
+          clipIndex: 2,
+          playbackRate: 1.5,
+        ),
+      );
+      await map.nativeRiggedModelProbe.updateRiggedModel(
+        NativeRiggedModelProbeUpdate(
+          latitude: 10.001,
+          longitude: 106.002,
+          headingDegrees: 1,
+        ),
+      );
+      expect(calls.map((call) => call.method), [
+        'updateRiggedModel',
+        'updateRiggedModel',
+      ]);
+      expect(calls.first.arguments, {
+        'protocolVersion': 1,
+        'latitude': 10.0,
+        'longitude': 106.0,
+        'headingDegrees': 359.0,
+        'clipIndex': 2,
+        'playbackRate': 1.5,
+      });
+      expect(calls.last.arguments, {
+        'protocolVersion': 1,
+        'latitude': 10.001,
+        'longitude': 106.002,
+        'headingDegrees': 1.0,
+      });
+    },
+  );
+
+  test('preserves native update failures', () async {
+    for (final code in [
+      'MODEL_NOT_ATTACHED',
+      'INVALID_ARGUMENTS',
+      'MAP_DISPOSED',
+    ]) {
+      messenger.setMockMethodCallHandler(channel, (_) async {
+        throw PlatformException(code: code);
+      });
+      await expectLater(
+        map.nativeRiggedModelProbe.updateRiggedModel(
+          NativeRiggedModelProbeUpdate(
+            latitude: 0,
+            longitude: 0,
+            headingDegrees: 0,
+          ),
+        ),
+        throwsA(
+          isA<PlatformException>().having((error) => error.code, 'code', code),
+        ),
+      );
+    }
+  });
+
+  test(
     'shares map disposal with the cube channel and blocks later requests',
     () async {
       final probe = map.nativeRiggedModelProbe;
@@ -109,6 +173,16 @@ void main() {
       disposed = true;
       await expectLater(probe.getDiagnostics(), throwsStateError);
       await expectLater(probe.setPaused(false), throwsStateError);
+      await expectLater(
+        probe.updateRiggedModel(
+          NativeRiggedModelProbeUpdate(
+            latitude: 0,
+            longitude: 0,
+            headingDegrees: 0,
+          ),
+        ),
+        throwsStateError,
+      );
       expect(calls, isEmpty);
     },
   );

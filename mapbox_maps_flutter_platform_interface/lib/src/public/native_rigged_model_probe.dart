@@ -79,6 +79,49 @@ final class NativeRiggedModelProbeOptions {
   final bool paused;
 }
 
+/// Updates one accepted model without decoding its GLB or replacing GPU meshes.
+///
+/// Omitted clip and playback rate preserve the current selection. The native
+/// clock resets only when [clipIndex] changes to a different clip.
+final class NativeRiggedModelProbeUpdate {
+  NativeRiggedModelProbeUpdate({
+    required this.latitude,
+    required this.longitude,
+    required this.headingDegrees,
+    this.clipIndex,
+    this.playbackRate,
+  }) {
+    if (!latitude.isFinite ||
+        latitude.abs() > NativeCubeProbeOptions.mercatorLatitudeLimit) {
+      throw ArgumentError.value(latitude, 'latitude', 'Outside Mercator range');
+    }
+    if (!longitude.isFinite || longitude.abs() > 180) {
+      throw ArgumentError.value(longitude, 'longitude', 'Outside WGS84 range');
+    }
+    if (!headingDegrees.isFinite) {
+      throw ArgumentError.value(
+        headingDegrees,
+        'headingDegrees',
+        'Must be finite',
+      );
+    }
+    final clip = clipIndex;
+    if (clip != null && clip < 0) {
+      throw ArgumentError.value(clip, 'clipIndex', 'Must be nonnegative');
+    }
+    final rate = playbackRate;
+    if (rate != null && (!rate.isFinite || rate < 0 || rate > 4)) {
+      throw ArgumentError.value(rate, 'playbackRate', 'Outside [0, 4]');
+    }
+  }
+
+  final double latitude;
+  final double longitude;
+  final double headingDegrees;
+  final int? clipIndex;
+  final double? playbackRate;
+}
+
 /// Native observations for one rigged model, separate from the cube probe.
 /// Draw submission and GPU readiness do not establish visual correctness.
 final class NativeRiggedModelProbeDiagnostics {

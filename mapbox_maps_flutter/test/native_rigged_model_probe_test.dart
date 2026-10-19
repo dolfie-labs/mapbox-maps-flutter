@@ -11,6 +11,7 @@ import 'mapbox_map_test.dart' show MockMapboxMapPlatformInterface;
 class FakeRiggedModelProbe implements NativeRiggedModelProbePlatformInterface {
   final calls = <String>[];
   NativeRiggedModelProbeOptions? options;
+  NativeRiggedModelProbeUpdate? update;
   bool? paused;
   final diagnostics = const NativeRiggedModelProbeDiagnostics(
     backend: NativeCustomLayerProbeBackend.iosMetal,
@@ -32,6 +33,12 @@ class FakeRiggedModelProbe implements NativeRiggedModelProbePlatformInterface {
   Future<void> attachRiggedModel(NativeRiggedModelProbeOptions options) async {
     calls.add('attach');
     this.options = options;
+  }
+
+  @override
+  Future<void> updateRiggedModel(NativeRiggedModelProbeUpdate update) async {
+    calls.add('update');
+    this.update = update;
   }
 
   @override
@@ -85,10 +92,18 @@ void main() {
         longitude: 0,
       );
       await probe.attachRiggedModel(options);
+      final update = NativeRiggedModelProbeUpdate(
+        latitude: 10,
+        longitude: 106,
+        headingDegrees: 90,
+        clipIndex: 1,
+      );
+      await probe.updateRiggedModel(update);
       await probe.setPaused(true);
       final state = await probe.getDiagnostics();
       await probe.detach();
       expect(implementation.probe.options, same(options));
+      expect(implementation.probe.update, same(update));
       expect(implementation.probe.paused, isTrue);
       expect(state, same(implementation.probe.diagnostics));
       expect(
@@ -99,6 +114,7 @@ void main() {
       expect(state.supportsSkeletalAnimation, isTrue);
       expect(implementation.probe.calls, [
         'attach',
+        'update',
         'pause',
         'diagnostics',
         'detach',

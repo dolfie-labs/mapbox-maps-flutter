@@ -8,9 +8,12 @@ model per map, sharing an exclusive slot with the cube probe.
 ## Supported input
 
 The common subset is GLB 2 with one embedded buffer, one scene instance of one
-untextured mesh/triangle primitive, one skin with at most 32 joints, and at most
+mesh/triangle primitive (indexed or non-indexed), one skin with at most 32 joints, and at most
 128 nodes. Dense POSITION, JOINTS_0 and float WEIGHTS_0 accessors are supported;
-NORMAL is optional. Native evaluators apply hierarchy transforms and inverse-bind
+NORMAL is optional. TEXCOORD_0 supports one embedded PNG/JPEG base-color texture,
+bounded to 2,048 pixels per side and four million pixels. The renderer supports
+nearest/linear filtering, mipmaps and glTF wrap modes; assets without textures
+retain their base-color factor. Native evaluators apply hierarchy transforms and inverse-bind
 matrices, LINEAR/STEP translation/rotation/scale channels, and quaternion slerp.
 Animation uses the original timeline from zero through its last timestamp.
 Unsupported structures fail explicitly.
@@ -19,7 +22,7 @@ Both backends limit input to 2 MiB and keyframes to 4,096 per channel. Android
 limits JSON to 256 KiB/depth 64, vertices/indices to 20,000/60,000, clips to 16,
 and decoded accessor scalars to 2,000,000. iOS limits vertices/indices to
 65,536/196,608, clips to 8, and decoded animation scalars to 65,536. Use the smaller
-limits when preparing portable assets. Textures, PBR lighting, morph targets and
+limits when preparing portable assets. External images, PBR lighting, morph targets and
 extensions are outside this subset.
 
 ## Dart use
@@ -46,6 +49,26 @@ final observation = await probe.getDiagnostics();
 await probe.setPaused(true);
 await probe.detach();
 ```
+
+After CPU acceptance, update placement or select an existing clip without
+re-decoding the GLB or reallocating its mesh:
+
+```dart
+await probe.updateRiggedModel(NativeRiggedModelProbeUpdate(
+  latitude: nextLatitude,
+  longitude: nextLongitude,
+  headingDegrees: course,
+  clipIndex: 1,
+));
+```
+
+Coordinates and heading interpolate natively over 500 ms, including the short
+arc at the dateline/heading wrap. An omitted clip/rate preserves its value;
+GPS-only or playback-rate updates preserve accumulated animation time. Only a
+changed clip resets its clock. Paused animation can still render placement
+interpolation; an inactive application suspends native repaint work entirely.
+Updates before acceptance fail with `MODEL_NOT_ATTACHED`; invalid clip/rate or
+coordinates fail with `INVALID_ARGUMENTS`.
 
 Attach success means CPU validation accepted the asset. Poll diagnostics for
 `ready` after real GPU resource creation; inspect `renderedFrames`,
@@ -79,6 +102,21 @@ diagnostic. Both must preserve the caller's layer.
 The 15,104-byte RiggedSimple fixture has 160 vertices, two joints and one unnamed
 clip at index 0. It is unchanged, © 2017 Cesium, CC BY 4.0; preserve its
 [attribution and manifest](../tool/animated_entities/README.md). It is not a
-Walk/Idle clip. Verification also passed 305 Flutter tests, 22 Python validator
-tests and Swift CPU decoder checks. Physical-device performance, ten entities,
-GPS follow and outfit changes remain unverified or unimplemented; P1 is pending.
+Walk/Idle clip. Verification also passed 310 Flutter tests, 22 Python validator
+tests and Swift CPU decoder checks. Physical-device performance,
+multiple independent actors and outfit changes remain unverified or unimplemented.
+
+## Home character fixture
+
+The original Khronos Fox is also included in the example: 1728 non-indexed
+vertices, 24 joints, one 1024×1024 embedded PNG and three clips: `Survey` (index
+0, used as semantic idle), `Walk` (1), `Run` (2). The file is unchanged; preserve
+`Fox.ATTRIBUTION.md`, `Fox.UPSTREAM_README.md` and `Fox.manifest.json` alongside it.
+The authored +Z forward axis needs a 180° asset offset when the application
+supplies north-based GPS course; do not change the generic glTF basis.
+
+`integration_test/home_character_fox_test.dart` verifies real textured GPU
+rendering of all three clips, cached GPS/rate updates, clock/palette retention,
+style restoration and detach. Both Android emulator GLES and iOS Simulator
+Metal passed this gate. Home location ownership and speed-to-gait policy remain
+application responsibilities; this is still a single-model capability.

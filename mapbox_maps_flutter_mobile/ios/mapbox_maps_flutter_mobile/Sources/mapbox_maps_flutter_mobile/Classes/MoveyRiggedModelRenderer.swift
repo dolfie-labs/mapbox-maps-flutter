@@ -37,14 +37,17 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
     private var renderedFrames = 0
     private var poseRevision = 0
     private var measuredPalette: [simd_float4x4]?
-    private var animationTime = 0.0
-    private var lastFrameTime: CFTimeInterval?
+    private var clock = MoveyRiggedAnimationClock()
+    private var placement: MoveyRiggedPlacementTween?
+    private var foreground = true
     private var lastErrorCode: String?
     private var device: MTLDevice?
     private var pipeline: MTLRenderPipelineState?
     private var depthState: MTLDepthStencilState?
     private var vertexBuffer: MTLBuffer?
     private var indexBuffer: MTLBuffer?
+    private var baseColorTexture: MTLTexture?
+    private var textureSampler: MTLSamplerState?
     private var uploadedGeneration = -1
 
     func configure(asset: MoveyRiggedAsset, configuration: MoveyRiggedConfiguration) {
@@ -56,8 +59,11 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         renderedFrames = 0
         poseRevision = 0
         measuredPalette = nil
-        animationTime = 0
-        lastFrameTime = nil
+        clock.reset()
+        var tween = MoveyRiggedPlacementTween(.init(latitude: configuration.latitude, longitude: configuration.longitude,
+                                                   headingDegrees: configuration.headingDegrees), now: CACurrentMediaTime())
+        tween.setSuspended(!foreground, now: CACurrentMediaTime())
+        placement = tween
         lastErrorCode = nil
         lock.unlock()
     }
@@ -69,15 +75,58 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         generation += 1
         ready = false
         paused = true
-        lastFrameTime = nil
+        clock.suspend()
+        placement = nil
         lock.unlock()
     }
 
     func setPaused(_ value: Bool) {
         lock.lock()
-        if paused != value { lastFrameTime = nil }
+        if paused != value {
+            advanceClock(now: CACurrentMediaTime())
+            clock.suspend()
+        }
         paused = value
         lock.unlock()
+    }
+
+    func setForeground(_ value: Bool) {
+        lock.lock()
+        placement?.setSuspended(!value, now: CACurrentMediaTime())
+        foreground = value
+        lock.unlock()
+    }
+
+    var isMoving: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return placement?.isMoving(now: CACurrentMediaTime()) == true
+    }
+
+    /// Updates only cached placement/clock state. Asset generations and GPU
+    /// resources remain unchanged for GPS, heading, clip and rate updates.
+    func update(latitude: Double, longitude: Double, headingDegrees: Double,
+                clipIndex: Int?, playbackRate: Double?) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let asset, let current = configuration else { return "MODEL_NOT_ATTACHED" }
+        let clip = clipIndex ?? current.clipIndex
+        guard asset.clips.indices.contains(clip) else { return "INVALID_ARGUMENTS" }
+        let now = CACurrentMediaTime()
+        advanceClock(now: now)
+        if clip != current.clipIndex { clock.reset() }
+        configuration = MoveyRiggedConfiguration(latitude: latitude, longitude: longitude,
+            altitudeMeters: current.altitudeMeters, heightMeters: current.heightMeters, headingDegrees: headingDegrees,
+            clipIndex: clip, playbackRate: playbackRate ?? current.playbackRate)
+        // Establish the same clock boundary for a new rate without a time jump.
+        advanceClock(now: now)
+        placement?.retarget(.init(latitude: latitude, longitude: longitude, headingDegrees: headingDegrees), now: now)
+        return nil
+    }
+
+    /// Caller holds lock, so a clock edge always uses one immutable clip/rate.
+    private func advanceClock(now: Double) {
+        guard let asset, let configuration else { return }
+        clock.tick(now: now, rate: configuration.playbackRate,
+                   duration: asset.clips[configuration.clipIndex].duration, playing: !paused)
     }
 
     func recordError(_ code: String) {
@@ -88,7 +137,7 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         lock.lock()
         defer { lock.unlock() }
         return Diagnostics(ready: ready, renderedFrames: renderedFrames, poseRevision: poseRevision,
-                           animationTimeSeconds: animationTime, vertexCount: asset?.vertices.count ?? 0,
+                           animationTimeSeconds: clock.time, vertexCount: asset?.vertices.count ?? 0,
                            jointCount: asset?.joints.count ?? 0, clipCount: asset?.clips.count ?? 0,
                            clipIndex: configuration?.clipIndex ?? 0, lastErrorCode: lastErrorCode)
     }
@@ -125,16 +174,10 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         guard let asset, let configuration, lastErrorCode == nil else { lock.unlock(); return }
         let snapshotGeneration = generation
         let now = CACurrentMediaTime()
-        if !paused && configuration.playbackRate > 0 {
-            if let previous = lastFrameTime {
-                let advance = max(0, now - previous) * configuration.playbackRate
-                if advance > 0 {
-                    animationTime = (animationTime + advance).truncatingRemainder(dividingBy: asset.clips[configuration.clipIndex].duration)
-                }
-            }
-            lastFrameTime = now
-        } else { lastFrameTime = nil }
-        let time = animationTime
+        advanceClock(now: now)
+        let time = clock.time
+        let position = placement?.sample(now: now) ?? .init(latitude: configuration.latitude, longitude: configuration.longitude,
+                                                          headingDegrees: configuration.headingDegrees)
         lock.unlock()
 
         if uploadedGeneration != snapshotGeneration {
@@ -147,6 +190,11 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
                 return device.makeBuffer(bytes: base, length: values.count * MemoryLayout<UInt32>.stride, options: [])
             }
             guard let newVertices, let newIndices else { recordError("METAL_BUFFER_UNAVAILABLE"); return }
+            guard let material = makeTexture(asset.texture, device: device, commandBuffer: mtlCommandBuffer) else {
+                recordError("METAL_TEXTURE_UNAVAILABLE"); return
+            }
+            baseColorTexture = material.0
+            textureSampler = material.1
             vertexBuffer = newVertices
             indexBuffer = newIndices
             uploadedGeneration = snapshotGeneration
@@ -154,11 +202,11 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
             if generation == snapshotGeneration { ready = true }
             lock.unlock()
         }
-        guard let vertices = vertexBuffer, let indices = indexBuffer,
+        guard let vertices = vertexBuffer, let indices = indexBuffer, let materialTexture = baseColorTexture, let sampler = textureSampler,
               let pose = asset.pose(time: time, clipIndex: configuration.clipIndex),
-              var matrix = MoveyGeographicMatrix.make(parameters, latitude: configuration.latitude, longitude: configuration.longitude,
+              var matrix = MoveyGeographicMatrix.make(parameters, latitude: position.latitude, longitude: position.longitude,
                                                        altitudeMeters: configuration.altitudeMeters, sizeMeters: configuration.heightMeters,
-                                                       headingDegrees: configuration.headingDegrees, local: asset.normalizedWorldToMap) else {
+                                                       headingDegrees: position.headingDegrees, local: asset.normalizedWorldToMap) else {
             recordError("INVALID_TRANSFORM"); return
         }
         lock.lock()
@@ -183,6 +231,8 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         }
         var color = asset.baseColor
         encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        encoder.setFragmentTexture(materialTexture, index: 0)
+        encoder.setFragmentSamplerState(sampler, index: 0)
         encoder.drawIndexedPrimitives(type: .triangle, indexCount: asset.indices.count, indexType: .uint32, indexBuffer: indices, indexBufferOffset: 0)
         encoder.endEncoding()
         // Mapbox owns submission, presentation and the render target.
@@ -199,15 +249,49 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         depthState = nil
         vertexBuffer = nil
         indexBuffer = nil
+        baseColorTexture = nil
+        textureSampler = nil
         uploadedGeneration = -1
-        lock.lock(); ready = false; lastFrameTime = nil; lock.unlock()
+        lock.lock(); ready = false; clock.suspend(); lock.unlock()
+    }
+
+    private func makeTexture(_ image: MoveyRiggedTexture?, device: MTLDevice,
+                             commandBuffer: MTLCommandBuffer) -> (MTLTexture, MTLSamplerState)? {
+        let width = image?.width ?? 1, height = image?.height ?? 1
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height,
+                                                                 mipmapped: image?.requiresMipmaps == true)
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        let rgba = image?.rgba ?? Data([255, 255, 255, 255])
+        rgba.withUnsafeBytes { bytes in
+            if let base = bytes.baseAddress { texture.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0,
+                                                              withBytes: base, bytesPerRow: width * 4) }
+        }
+        if image?.requiresMipmaps == true {
+            guard let blit = commandBuffer.makeBlitCommandEncoder() else { return nil }
+            blit.generateMipmaps(for: texture)
+            blit.endEncoding()
+        }
+        let sampler = MTLSamplerDescriptor()
+        sampler.magFilter = image?.magFilter == 9728 ? .nearest : .linear
+        let min = image?.minFilter ?? 9729
+        sampler.minFilter = [9728, 9984, 9986].contains(min) ? .nearest : .linear
+        sampler.mipFilter = [9984, 9985].contains(min) ? .nearest : ([9986, 9987].contains(min) ? .linear : .notMipmapped)
+        func address(_ value: Int?) -> MTLSamplerAddressMode {
+            switch value { case 33071: return .clampToEdge; case 33648: return .mirrorRepeat; default: return .repeat }
+        }
+        sampler.sAddressMode = address(image?.wrapS)
+        sampler.tAddressMode = address(image?.wrapT)
+        guard let state = device.makeSamplerState(descriptor: sampler) else { return nil }
+        return (texture, state)
     }
 
     private static let shader = """
     #include <metal_stdlib>
     using namespace metal;
-    struct SkinVertex { float4 position; uint4 joints; float4 weights; };
-    struct SkinOutput { float4 position [[position]]; };
+    struct SkinVertex { float4 position; uint4 joints; float4 weights; float2 uv; };
+    struct SkinOutput { float4 position [[position]]; float2 uv; };
     vertex SkinOutput moveySkinVertex(uint id [[vertex_id]], constant SkinVertex *vertices [[buffer(0)]],
         constant float4x4 &mvp [[buffer(1)]], constant float4x4 *jointWorldInverseBind [[buffer(2)]]) {
         SkinVertex v = vertices[id];
@@ -215,9 +299,12 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
                      + (jointWorldInverseBind[v.joints.y] * v.position) * v.weights.y
                      + (jointWorldInverseBind[v.joints.z] * v.position) * v.weights.z
                      + (jointWorldInverseBind[v.joints.w] * v.position) * v.weights.w;
-        SkinOutput output; output.position = mvp * world; return output;
+        SkinOutput output; output.position = mvp * world; output.uv = v.uv; return output;
     }
-    fragment float4 moveySkinFragment(SkinOutput input [[stage_in]], constant float4 &baseColor [[buffer(0)]]) { return baseColor; }
+    fragment float4 moveySkinFragment(SkinOutput input [[stage_in]], constant float4 &baseColor [[buffer(0)]],
+        texture2d<float> baseTexture [[texture(0)]], sampler baseSampler [[sampler(0)]]) {
+        return float4(baseTexture.sample(baseSampler, input.uv).rgb * baseColor.rgb, 1.0);
+    }
     """
 }
 

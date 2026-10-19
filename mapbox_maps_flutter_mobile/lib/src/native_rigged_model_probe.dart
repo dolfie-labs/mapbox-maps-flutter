@@ -23,6 +23,19 @@ class _NativeRiggedModelProbeChannel
   }
 
   @override
+  Future<void> updateRiggedModel(NativeRiggedModelProbeUpdate update) async {
+    final clipIndex = update.clipIndex;
+    final playbackRate = update.playbackRate;
+    await _channel._invoke('updateRiggedModel', {
+      'latitude': update.latitude,
+      'longitude': update.longitude,
+      'headingDegrees': update.headingDegrees,
+      'clipIndex': ?clipIndex,
+      'playbackRate': ?playbackRate,
+    });
+  }
+
+  @override
   Future<void> setPaused(bool paused) => _channel.setPaused(paused);
 
   @override

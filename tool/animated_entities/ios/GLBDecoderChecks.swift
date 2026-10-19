@@ -7,6 +7,7 @@ import simd
 
 @main struct Checks {
     static func main() throws {
+        precondition(MemoryLayout<MoveySkinVertex>.stride == 64 && MemoryLayout<MoveySkinVertex>.offset(of: \.texCoord) == 48)
         let path = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "tool/animated_entities/fixtures/RiggedSimple.glb"
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         let asset = try MoveyGLBDecoder.decode(data, cancellation: MoveyGLBCancellation())
@@ -26,7 +27,7 @@ import simd
         func withCurves(_ curves: [MoveyRiggedAsset.Curve]) -> MoveyRiggedAsset {
             .init(vertices: asset.vertices, indices: asset.indices, nodes: asset.nodes, traversal: asset.traversal,
                   joints: asset.joints, inverseBindMatrices: asset.inverseBindMatrices,
-                  clips: [.init(duration: 1, curves: curves)], baseColor: asset.baseColor,
+                  clips: [.init(duration: 1, curves: curves)], baseColor: asset.baseColor, texture: asset.texture,
                   normalizedWorldToMap: asset.normalizedWorldToMap)
         }
         func equal(_ a: MoveyRiggedAsset.Pose, _ b: MoveyRiggedAsset.Pose) -> Bool {
@@ -48,7 +49,8 @@ import simd
         let cancelled = MoveyGLBCancellation(); cancelled.cancel()
         do { _ = try MoveyGLBDecoder.decode(data, cancellation: cancelled); fatalError("Expected cancellation") }
         catch let error as MoveyGLBFailure { precondition(error.code == "LOAD_SUPERSEDED") }
-        func modified(_ mutate: (inout [String: Any]) -> Void) throws -> Data {
+        func modified(_ source: Data? = nil, _ mutate: (inout [String: Any]) -> Void) throws -> Data {
+            let data = source ?? data
             let original = [UInt8](data)
             let jsonLength = Int(UInt32(original[12]) | UInt32(original[13]) << 8 | UInt32(original[14]) << 16 | UInt32(original[15]) << 24)
             var json = try JSONSerialization.jsonObject(with: data.subdata(in: 20..<(20 + jsonLength))) as! [String: Any]
@@ -66,6 +68,51 @@ import simd
         try expect(modified { root in var nodes = root["nodes"] as! [[String: Any]]; nodes[4]["children"] = [0]; root["nodes"] = nodes }, "GLB_INVALID")
         try expect(modified { root in var views = root["bufferViews"] as! [[String: Any]]; views[0]["byteOffset"] = 999999; root["bufferViews"] = views }, "GLB_INVALID")
         try expect(modified { root in var animations = root["animations"] as! [[String: Any]]; var samplers = animations[0]["samplers"] as! [[String: Any]]; samplers[0]["interpolation"] = "CUBICSPLINE"; animations[0]["samplers"] = samplers; root["animations"] = animations }, "GLB_UNSUPPORTED")
+        var clock = MoveyRiggedAnimationClock()
+        clock.tick(now: 1, rate: 1, duration: 10, playing: true)
+        clock.tick(now: 2, rate: 1, duration: 10, playing: true)
+        precondition(clock.time == 1)
+        clock.tick(now: 2, rate: 2, duration: 10, playing: true)
+        precondition(clock.time == 1)
+        clock.tick(now: 2.5, rate: 2, duration: 10, playing: true)
+        precondition(clock.time == 2)
+        clock.suspend(); clock.tick(now: 99, rate: 2, duration: 10, playing: false)
+        precondition(clock.time == 2)
+        clock.reset(); precondition(clock.time == 0)
+        var tween = MoveyRiggedPlacementTween(.init(latitude: 10, longitude: 179, headingDegrees: 350), now: 0)
+        tween.retarget(.init(latitude: 12, longitude: -179, headingDegrees: 10), now: 1)
+        let midpoint = tween.sample(now: 1.25)
+        precondition(abs(abs(midpoint.longitude) - 180) < 1e-8 && abs(midpoint.headingDegrees) < 1e-8)
+        tween.setSuspended(true, now: 1.25)
+        precondition(tween.sample(now: 99).latitude == midpoint.latitude)
+        tween.setSuspended(false, now: 99)
+        precondition(tween.sample(now: 99).latitude == midpoint.latitude)
+        tween.retarget(.init(latitude: 13, longitude: -178, headingDegrees: 20), now: 99)
+        precondition(tween.sample(now: 99).latitude == midpoint.latitude)
+        precondition(!tween.isMoving(now: 100) && tween.sample(now: 100).latitude == 13)
+        if CommandLine.arguments.count > 2 {
+            let foxData = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2]))
+            let fox = try MoveyGLBDecoder.decode(foxData, cancellation: MoveyGLBCancellation())
+            precondition(fox.vertices.count == 1728 && fox.indices.count == 1728 && fox.joints.count == 24 && fox.clips.count == 3)
+            precondition(fox.texture?.width == 1024 && fox.texture?.height == 1024 && fox.texture?.rgba.count == 4_194_304)
+            precondition(fox.texture?.requiresMipmaps == true && fox.texture?.wrapS == 10497)
+            precondition(fox.vertices.contains { $0.texCoord != SIMD2<Float>(0, 0) })
+            for clip in 0..<3 {
+                let a = fox.pose(time: 0, clipIndex: clip)!, b = fox.pose(time: fox.clips[clip].duration * 0.4, clipIndex: clip)!
+                precondition(!equal(a, b))
+            }
+            try expect(modified(foxData) { root in
+                var images = root["images"] as! [[String: Any]]; images[0]["uri"] = "https://example.invalid/texture.png"; root["images"] = images
+            }, "GLB_UNSUPPORTED")
+            try expect(modified(foxData) { root in
+                var images = root["images"] as! [[String: Any]]; images[0]["bufferView"] = 0; root["images"] = images
+            }, "GLB_INVALID")
+            try expect(modified(foxData) { root in
+                var samplers = root["samplers"] as! [[String: Any]]; samplers[0]["minFilter"] = 9982; root["samplers"] = samplers
+            }, "GLB_UNSUPPORTED")
+            print("PASS original Fox embedded PNG/UV, 24-joint GPU input, three actual animated palettes; external image, malformed image, sampler rejection")
+        }
+        print("PASS native placement short-arc/dateline, retarget continuity and foreground suspension")
         print("PASS RiggedSimple decode, actual pose deformation, grounded unit rest height, quaternion short arc, STEP, malformed/header/bounds/cycle/extension/interpolation/cancellation limits")
     }
 }

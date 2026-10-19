@@ -1,5 +1,7 @@
 package com.mapbox.maps.mapbox_maps
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -36,6 +38,8 @@ internal object RiggedGlbLoader {
       throw GlbException("GLB_INVALID")
     } catch (_: IndexOutOfBoundsException) {
       throw GlbException("GLB_INVALID")
+    } catch (_: OutOfMemoryError) {
+      throw GlbException("GLB_TOO_LARGE")
     }
   }
 
@@ -61,8 +65,9 @@ internal object RiggedGlbLoader {
       validateJsonDepth(text)
       json = JSONObject(text)
       validateExtensionsRecursively(json)
-      for (key in listOf("textures", "images", "cameras")) {
-        if (json.has(key)) unsupported(json.getJSONArray(key).length() == 0)
+      if (json.has("cameras")) unsupported(json.getJSONArray("cameras").length() == 0)
+      for (key in listOf("textures", "images", "samplers")) {
+        if (json.has(key)) unsupported(json.getJSONArray(key).length() <= 1)
       }
       file.position(20 + jsonLength)
       invalid(file.remaining() >= 8)
@@ -145,7 +150,7 @@ internal object RiggedGlbLoader {
       unsupported(integer(primitive, "mode", 4) == 4 && !primitive.has("targets"))
       rejectExtensions(primitive)
       val attributes = primitive.getJSONObject("attributes")
-      val allowed = setOf("POSITION", "NORMAL", "JOINTS_0", "WEIGHTS_0")
+      val allowed = setOf("POSITION", "NORMAL", "JOINTS_0", "WEIGHTS_0", "TEXCOORD_0")
       for (key in attributes.keys()) unsupported(key in allowed)
       val positionAccessor = accessor(integer(attributes, "POSITION"))
       val vertexCount = integer(positionAccessor, "count")
@@ -155,20 +160,27 @@ internal object RiggedGlbLoader {
       val joints = unsigned(integer(attributes, "JOINTS_0"), "VEC4", vertexCount, false)
       for (joint in joints) invalid(joint in jointNodes.indices)
       val weights = weights(integer(attributes, "WEIGHTS_0"), vertexCount)
-      val indicesAccessor = accessor(integer(primitive, "indices"))
-      val indexCount = integer(indicesAccessor, "count")
-      unsupported(indexCount in 3..60000)
-      invalid(indexCount % 3 == 0)
-      val indices = unsigned(integer(primitive, "indices"), "SCALAR", indexCount, true)
+      val texCoords = if (attributes.has("TEXCOORD_0")) floats(integer(attributes, "TEXCOORD_0"), "VEC2", vertexCount) else FloatArray(vertexCount * 2)
+      val indices = if (primitive.has("indices")) {
+        val indicesAccessor = accessor(integer(primitive, "indices"))
+        val indexCount = integer(indicesAccessor, "count")
+        unsupported(indexCount in 3..60000)
+        invalid(indexCount % 3 == 0)
+        unsigned(integer(primitive, "indices"), "SCALAR", indexCount, true)
+      } else {
+        invalid(vertexCount % 3 == 0)
+        IntArray(vertexCount) { it }
+      }
       for (index in indices) invalid(index in 0 until vertexCount)
-      val color = readMaterial(primitive)
+      val material = readMaterial(primitive)
+      unsupported(material.texture == null || attributes.has("TEXCOORD_0"))
 
       val animationJson = json.getJSONArray("animations")
       unsupported(animationJson.length() in 1..16)
       val clips = Array(animationJson.length()) { clipIndex ->
         readClip(animationJson.getJSONObject(clipIndex), nodes)
       }
-      val model = RiggedGlbModel(positions, joints, weights, indices, color, nodes, parents, order, jointNodes, inverseBind, clips)
+      val model = RiggedGlbModel(positions, joints, weights, indices, material.color, texCoords, material.texture, nodes, parents, order, jointNodes, inverseBind, clips)
       // Bounds come from the actual bind pose, after hierarchy and inverse binds,
       // rather than assuming POSITION.min/max describes glTF's scene Y axis.
       val pose = RiggedPoseEvaluator(model)
@@ -205,8 +217,8 @@ internal object RiggedGlbLoader {
       return model
     }
 
-    private fun readMaterial(primitive: JSONObject): FloatArray {
-      if (!primitive.has("material")) return floatArrayOf(1f, 1f, 1f, 1f)
+    private fun readMaterial(primitive: JSONObject): RigMaterial {
+      if (!primitive.has("material")) return RigMaterial(floatArrayOf(1f, 1f, 1f, 1f), null)
       val materials = json.getJSONArray("materials")
       val index = integer(primitive, "material")
       invalid(index in 0 until materials.length())
@@ -215,12 +227,75 @@ internal object RiggedGlbLoader {
       unsupported(material.optString("alphaMode", "OPAQUE") == "OPAQUE")
       for (key in listOf("normalTexture", "occlusionTexture", "emissiveTexture")) unsupported(!material.has(key))
       if (material.has("emissiveFactor")) unsupported(vector(material.getJSONArray("emissiveFactor"), 3).all { it == 0.0 })
-      if (!material.has("pbrMetallicRoughness")) return floatArrayOf(1f, 1f, 1f, 1f)
+      if (!material.has("pbrMetallicRoughness")) return RigMaterial(floatArrayOf(1f, 1f, 1f, 1f), null)
       val pbr = material.getJSONObject("pbrMetallicRoughness")
-      unsupported(!pbr.has("baseColorTexture") && !pbr.has("metallicRoughnessTexture"))
+      unsupported(!pbr.has("metallicRoughnessTexture"))
       val color = if (pbr.has("baseColorFactor")) vector(pbr.getJSONArray("baseColorFactor"), 4) else doubleArrayOf(1.0, 1.0, 1.0, 1.0)
       invalid(color.all { it in 0.0..1.0 })
-      return FloatArray(4) { color[it].toFloat() }
+      val texture = if (pbr.has("baseColorTexture")) readTexture(pbr.getJSONObject("baseColorTexture")) else null
+      return RigMaterial(FloatArray(4) { color[it].toFloat() }, texture)
+    }
+
+    /** Embedded image decoding is performed only on the bounded CPU loader. */
+    private fun readTexture(info: JSONObject): RigTexture {
+      unsupported(integer(info, "texCoord", 0) == 0)
+      val textures = json.getJSONArray("textures")
+      val index = integer(info, "index")
+      invalid(index in 0 until textures.length())
+      val texture = textures.getJSONObject(index)
+      val images = json.getJSONArray("images")
+      val source = integer(texture, "source")
+      invalid(source in 0 until images.length())
+      val image = images.getJSONObject(source)
+      unsupported(!image.has("uri"))
+      val mimeType = image.getString("mimeType")
+      unsupported(mimeType == "image/png" || mimeType == "image/jpeg")
+      val viewIndex = integer(image, "bufferView")
+      invalid(viewIndex in 0 until views.length())
+      val view = views.getJSONObject(viewIndex)
+      unsupported(!view.has("byteStride"))
+      invalid(integer(view, "buffer") == 0)
+      val offset = integer(view, "byteOffset", 0)
+      val length = integer(view, "byteLength")
+      invalid(length > 0 && offset.toLong() + length <= binaryLength)
+      unsupported(length <= 1024 * 1024)
+      val encoded = ByteArray(length)
+      binary.duplicate().apply { position(offset); get(encoded) }
+      val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      BitmapFactory.decodeByteArray(encoded, 0, encoded.size, bounds)
+      invalid(bounds.outMimeType == mimeType)
+      unsupported(bounds.outWidth in 1..2048 && bounds.outHeight in 1..2048 && bounds.outWidth.toLong() * bounds.outHeight <= 4_194_304)
+      checkCancelled()
+      val options = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888; inScaled = false }
+      val bitmap = BitmapFactory.decodeByteArray(encoded, 0, encoded.size, options) ?: throw GlbException("GLB_INVALID")
+      val rgba: ByteArray
+      try {
+        invalid(bitmap.width == bounds.outWidth && bitmap.height == bounds.outHeight)
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        rgba = ByteArray(pixels.size * 4)
+        for (pixel in pixels.indices) {
+          if (pixel % 1024 == 0) checkCancelled()
+          val value = pixels[pixel]
+          rgba[pixel * 4] = (value ushr 16).toByte()
+          rgba[pixel * 4 + 1] = (value ushr 8).toByte()
+          rgba[pixel * 4 + 2] = value.toByte()
+          rgba[pixel * 4 + 3] = (value ushr 24).toByte()
+        }
+      } finally { bitmap.recycle() }
+      val sampler = if (texture.has("sampler")) {
+        val samplers = json.getJSONArray("samplers")
+        val samplerIndex = integer(texture, "sampler")
+        invalid(samplerIndex in 0 until samplers.length())
+        samplers.getJSONObject(samplerIndex)
+      } else JSONObject()
+      val minFilter = integer(sampler, "minFilter", 9729)
+      val magFilter = integer(sampler, "magFilter", 9729)
+      val wrapS = integer(sampler, "wrapS", 10497)
+      val wrapT = integer(sampler, "wrapT", 10497)
+      unsupported(minFilter in setOf(9728, 9729, 9984, 9985, 9986, 9987) && magFilter in setOf(9728, 9729))
+      unsupported(wrapS in setOf(33071, 33648, 10497) && wrapT in setOf(33071, 33648, 10497))
+      return RigTexture(bounds.outWidth, bounds.outHeight, rgba, minFilter, magFilter, wrapS, wrapT)
     }
 
     private fun readNode(value: JSONObject): RigNode {
@@ -294,7 +369,7 @@ internal object RiggedGlbLoader {
       invalid(accessor.getString("type") == type && integer(accessor, "count") == count)
       val component = integer(accessor, "componentType")
       unsupported(component in allowed)
-      val components = when (type) { "SCALAR" -> 1; "VEC3" -> 3; "VEC4" -> 4; "MAT4" -> 16; else -> throw GlbException("GLB_UNSUPPORTED") }
+      val components = when (type) { "SCALAR" -> 1; "VEC2" -> 2; "VEC3" -> 3; "VEC4" -> 4; "MAT4" -> 16; else -> throw GlbException("GLB_UNSUPPORTED") }
       val width = when (component) { 5121 -> 1; 5123 -> 2; 5125, 5126 -> 4; else -> throw GlbException("GLB_UNSUPPORTED") }
       val viewIndex = integer(accessor, "bufferView")
       invalid(viewIndex in 0 until views.length())
@@ -465,6 +540,8 @@ internal class RiggedGlbModel(
   val weights: FloatArray,
   val indices: IntArray,
   val color: FloatArray,
+  val texCoords: FloatArray,
+  val texture: RigTexture?,
   val nodes: Array<RigNode>,
   val parents: IntArray,
   val order: IntArray,
@@ -476,6 +553,9 @@ internal class RiggedGlbModel(
   val restBounds = DoubleArray(4)
   val vertexCount get() = positions.size / 3
 }
+
+internal class RigTexture(val width: Int, val height: Int, val rgba: ByteArray, val minFilter: Int, val magFilter: Int, val wrapS: Int, val wrapT: Int)
+private class RigMaterial(val color: FloatArray, val texture: RigTexture?)
 
 internal class RigNode(val matrix: DoubleArray?, val translation: DoubleArray, val rotation: DoubleArray, val scale: DoubleArray, val children: IntArray)
 internal class RigClip(val channels: Array<RigChannel>, val start: Double, val end: Double) { val duration get() = end }

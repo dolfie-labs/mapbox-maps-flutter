@@ -107,6 +107,37 @@ final class MoveyAnimatedEntitiesHost: NSObject {
             result(nil)
         case "attachRiggedModel":
             attachRiggedModel(arguments, result: result)
+        case "updateRiggedModel":
+            guard let latitude = number(arguments, "latitude"), abs(latitude) <= Self.mercatorLatitudeLimit,
+                  let longitude = number(arguments, "longitude"), abs(longitude) <= 180,
+                  let heading = number(arguments, "headingDegrees") else {
+                result(error("INVALID_ARGUMENTS", "An update requires finite Mercator coordinates and heading.")); return
+            }
+            var clipIndex: Int?
+            if arguments["clipIndex"] != nil {
+                guard let clip = number(arguments, "clipIndex"), clip.rounded(.towardZero) == clip,
+                      clip >= 0, clip <= Double(Int32.max) else {
+                    result(error("INVALID_ARGUMENTS", "clipIndex must be a nonnegative integer.")); return
+                }
+                clipIndex = Int(clip)
+            }
+            var playbackRate: Double?
+            if arguments["playbackRate"] != nil {
+                guard let rate = number(arguments, "playbackRate"), rate >= 0, rate <= 4 else {
+                    result(error("INVALID_ARGUMENTS", "playbackRate must be in [0, 4].")); return
+                }
+                playbackRate = rate
+            }
+            guard attached, activeRigged else {
+                result(error("MODEL_NOT_ATTACHED", "A CPU-accepted rigged model is required before an update.")); return
+            }
+            if let code = riggedRenderer.update(latitude: latitude, longitude: longitude, headingDegrees: heading,
+                                                 clipIndex: clipIndex, playbackRate: playbackRate) {
+                result(error(code, "The model update could not be accepted.")); return
+            }
+            if let playbackRate { modelPlaybackRate = playbackRate }
+            syncRepaint()
+            result(nil)
         case "setPaused":
             guard let paused = boolean(arguments, "paused") else { result(error("INVALID_ARGUMENTS", "paused must be a boolean.")); return }
             requestedPaused = paused
@@ -264,12 +295,14 @@ final class MoveyAnimatedEntitiesHost: NSObject {
     }
     private func syncRepaint() {
         renderer.setPaused(requestedPaused || !foreground)
+        riggedRenderer.setForeground(foreground)
         riggedRenderer.setPaused(requestedPaused || !foreground)
         guard !disposed, attached, foreground, ownsLayer,
               let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId), activeError == nil else { stopRepaint(); return }
         map.triggerRepaint()
-        let advances = activeRigged ? modelPlaybackRate > 0 : rotationDegreesPerSecond != 0
-        guard !requestedPaused, advances else { stopRepaint(); return }
+        let advances = activeRigged ? ((!requestedPaused && modelPlaybackRate > 0) || riggedRenderer.isMoving)
+                                    : (!requestedPaused && rotationDegreesPerSecond != 0)
+        guard advances else { stopRepaint(); return }
         guard displayLink == nil else { return }
         let target = MoveyCubeDisplayLinkTarget(host: self)
         let link = CADisplayLink(target: target, selector: #selector(MoveyCubeDisplayLinkTarget.tick))
@@ -279,9 +312,13 @@ final class MoveyAnimatedEntitiesHost: NSObject {
         link.add(to: .main, forMode: .common)
     }
     fileprivate func repaint() {
-        guard !disposed, attached, foreground, ownsLayer, !requestedPaused,
+        guard !disposed, attached, foreground, ownsLayer,
               let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId), activeError == nil else { stopRepaint(); return }
+        // Trigger the endpoint frame before stopping a paused placement tween.
         map.triggerRepaint()
+        let advances = activeRigged ? ((!requestedPaused && modelPlaybackRate > 0) || riggedRenderer.isMoving)
+                                    : (!requestedPaused && rotationDegreesPerSecond != 0)
+        if !advances { stopRepaint() }
     }
     private func stopRepaint() { displayLink?.invalidate(); displayLink = nil; displayLinkTarget = nil }
 }

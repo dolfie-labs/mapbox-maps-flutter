@@ -20,3 +20,11 @@ The on-device test is
 `mapbox_maps_flutter/example/integration_test/native_rigged_model_probe_test.dart`.
 Its `ready` flag follows native GPU buffer creation. Preserve external pose A/B
 captures alongside the JSON diagnostics to verify visible deformation.
+
+The optional second GLB argument checks the original Khronos Fox fixture as well:
+
+```sh
+/private/tmp/movey-glb-check tool/animated_entities/fixtures/RiggedSimple.glb mapbox_maps_flutter/example/assets/animated_entities/Fox.glb
+```
+
+These checks include Fox UVs, the bounded embedded PNG decode, 24 joints and three distinct animated palettes; native clock rate continuity, clip reset primitives, dateline/heading short arcs, placement retarget continuity, and background suspension. The iOS integration test is still required to prove Metal texture upload, skinning, clip switching and placement rendering.

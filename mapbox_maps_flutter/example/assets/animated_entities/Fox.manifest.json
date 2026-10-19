@@ -1,0 +1,136 @@
+{
+  "asset": "Fox.glb",
+  "sourceRepository": "KhronosGroup/glTF-Sample-Assets",
+  "sourceCommit": "edc7c9e67c639d230715049ee31f9a96a6babbbe",
+  "sourcePath": "Models/Fox/glTF-Binary/Fox.glb",
+  "sourceUrl": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/edc7c9e67c639d230715049ee31f9a96a6babbbe/Models/Fox/glTF-Binary/Fox.glb",
+  "gitBlobSha": "1ef5c0d05658caea339680fe581aa2c8302b3365",
+  "byteLength": 162852,
+  "sha256": "d97044e701822bac5a62696459b27d7b375aada5de8574ed4362edbba94771f7",
+  "modified": false,
+  "license": "CC-BY-4.0 for rigging/animation and conversion; original model CC0-1.0",
+  "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+  "components": [
+    {
+      "author": "PixelMannen",
+      "work": "Model",
+      "copyrightYear": 2014,
+      "license": "CC0-1.0",
+      "licenseUrl": "https://creativecommons.org/publicdomain/zero/1.0/"
+    },
+    {
+      "author": "tomkranis",
+      "work": "Rigging & Animation",
+      "copyrightYear": 2014,
+      "license": "CC-BY-4.0"
+    },
+    {
+      "author": "@AsoboStudio and @scurest",
+      "work": "Conversion to glTF",
+      "copyrightYear": 2017,
+      "license": "CC-BY-4.0"
+    }
+  ],
+  "validation": {
+    "glbVersion": 2,
+    "jsonBytes": 16156,
+    "binaryBytes": 146668,
+    "bufferViewCount": 8,
+    "accessorCount": 71,
+    "nodeCount": 26,
+    "meshCount": 1,
+    "primitiveCount": 1,
+    "mode": "TRIANGLES",
+    "indexed": false,
+    "vertexCount": 1728,
+    "triangleCount": 576,
+    "skinCount": 1,
+    "jointCount": 24,
+    "attributes": {
+      "POSITION": 0,
+      "TEXCOORD_0": 1,
+      "JOINTS_0": 2,
+      "WEIGHTS_0": 3
+    },
+    "extensionsUsed": [],
+    "clips": [
+      {
+        "index": 0,
+        "name": "Survey",
+        "semanticUse": "Idle",
+        "semanticUseNote": "Survey is the original name; Idle is the app state mapping.",
+        "startSeconds": 0.0,
+        "endSeconds": 3.4166667461395264,
+        "channelCount": 21,
+        "keyframesPerSamplerMin": 83,
+        "keyframesPerSamplerMax": 83,
+        "interpolation": [
+          "LINEAR"
+        ]
+      },
+      {
+        "index": 1,
+        "name": "Walk",
+        "semanticUse": "Walk",
+        "semanticUseNote": "Original named clip.",
+        "startSeconds": 0.0,
+        "endSeconds": 0.7083333134651184,
+        "channelCount": 21,
+        "keyframesPerSamplerMin": 18,
+        "keyframesPerSamplerMax": 18,
+        "interpolation": [
+          "LINEAR"
+        ]
+      },
+      {
+        "index": 2,
+        "name": "Run",
+        "semanticUse": "Run",
+        "semanticUseNote": "Original named clip.",
+        "startSeconds": 0.0,
+        "endSeconds": 1.1583333015441895,
+        "channelCount": 21,
+        "keyframesPerSamplerMin": 25,
+        "keyframesPerSamplerMax": 25,
+        "interpolation": [
+          "LINEAR"
+        ]
+      }
+    ],
+    "texture": {
+      "imageMimeType": "image/png",
+      "imageBufferView": 7,
+      "imageBytes": 26764,
+      "imageSha256": "61c8b109ee7f8bf262791933380fafb1465f7b51cbe6472c2d21eff0b31f83a1",
+      "width": 1024,
+      "height": 1024,
+      "bitDepth": 8,
+      "pngColorType": 2,
+      "material": {
+        "name": "fox_material",
+        "pbrMetallicRoughness": {
+          "baseColorTexture": {
+            "index": 0
+          },
+          "metallicFactor": 0,
+          "roughnessFactor": 0.58
+        }
+      },
+      "sampler": {
+        "magFilter": 9729,
+        "minFilter": 9987
+      },
+      "defaultWrapS": 10497,
+      "defaultWrapT": 10497
+    },
+    "checks": [
+      "GLB header/chunk bounds",
+      "every bufferView/accessor byte range and decoded finite value",
+      "accessor min/max against actual binary",
+      "skin influence indices and normalized weight sums",
+      "hierarchy parent uniqueness and cycles",
+      "animation timestamps/output counts/quaternion norms",
+      "embedded PNG chunk CRCs and decompressed scanline size"
+    ]
+  }
+}
