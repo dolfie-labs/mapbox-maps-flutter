@@ -1,6 +1,8 @@
 package com.mapbox.maps.mapbox_maps
 
 import android.view.Choreographer
+import android.os.Handler
+import android.os.Looper
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -13,8 +15,12 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.Future
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
-/** Map-scoped native cube proof. This does not load models or animate skeletons. */
+/** Map-scoped experimental probes. Existing Mapbox channels remain separate. */
 internal class AnimatedEntitiesController(
   private val mapView: MapView,
   private val mapboxMap: MapboxMap,
@@ -27,9 +33,21 @@ internal class AnimatedEntitiesController(
     "dev.movey.mapbox.animated_entities.v1.$channelSuffix",
   )
   private val cube = AtomicReference<AnimatedCubeState?>(null)
+  private val rigged = AtomicReference<RiggedModelState?>(null)
   private val renderedFrames = AtomicLong()
   private val choreographer = Choreographer.getInstance()
-  private var host: CubeCustomLayerHost? = null
+  // Style events may arrive before their main-thread work runs. Ownership must
+  // follow the style generation, rather than the lifetime of a host reference.
+  private val styleGeneration = AtomicLong()
+  private var host: ProbeGlesHost? = null
+  private var ownedHostStyleGeneration = -1L
+  private val mainHandler = Handler(Looper.getMainLooper())
+  private val loader = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue<Runnable>(1))
+  private var loadTask: Future<*>? = null
+  private var loadResult: MethodChannel.Result? = null
+  private var loadGeneration = 0L
+  private var modelRequested = false
+  private var modelLoadError: String? = null
   private var lifecycle: Lifecycle? = null
   private var viewAttached = false
   private var paused = false
@@ -47,7 +65,8 @@ internal class AnimatedEntitiesController(
         return
       }
       if (previousFrameNanos != 0L) {
-        cube.get()?.elapsedNanos?.addAndGet(frameTimeNanos - previousFrameNanos)
+        val elapsed = rigged.get()?.elapsedNanos ?: cube.get()?.elapsedNanos
+        elapsed?.addAndGet(frameTimeNanos - previousFrameNanos)
       }
       previousFrameNanos = frameTimeNanos
       mapboxMap.triggerRepaint()
@@ -58,9 +77,12 @@ internal class AnimatedEntitiesController(
   init {
     channel.setMethodCallHandler(this)
     styleSubscription = mapboxMap.subscribeStyleLoaded {
+      val generation = styleGeneration.incrementAndGet()
       // Map/style work and Flutter channels stay on the Android main thread.
       mapView.post {
-        if (!disposed && cube.get() != null) {
+        if (disposed || generation != styleGeneration.get()) return@post
+        discardStaleHost()
+        if (hasActiveProbe()) {
           try {
             installLayerIfNeeded()
             // A static cube still needs a frame after style restoration.
@@ -126,10 +148,14 @@ internal class AnimatedEntitiesController(
         "attachCube" -> {
           val nextCube = readCube(arguments)
           val nextPaused = readPaused(arguments)
+          cancelPendingLoad("LOAD_SUPERSEDED")
           lastErrorCode = null
           // A failed GPU initialization is retried only by an explicit attach.
-          if (host?.lastErrorCode?.get() != null) removeLayer()
+          if (rigged.get() != null || host?.lastErrorCode?.get() != null) removeLayer()
           host?.incomingGlErrorCode?.set(null)
+          rigged.set(null)
+          modelRequested = false
+          modelLoadError = null
           cube.set(nextCube)
           paused = nextPaused
           previousFrameNanos = 0L
@@ -138,13 +164,19 @@ internal class AnimatedEntitiesController(
           mapboxMap.triggerRepaint()
           result.success(null)
         }
+        "attachRiggedModel" -> attachRiggedModel(arguments, result)
+        "getRiggedModelDiagnostics" -> result.success(riggedDiagnostics())
         "setPaused" -> {
           paused = readPaused(arguments)
           updateRepaint()
           result.success(null)
         }
         "detach" -> {
+          cancelPendingLoad("LOAD_SUPERSEDED")
           cube.set(null)
+          rigged.set(null)
+          modelRequested = false
+          modelLoadError = null
           stopRepaint()
           removeLayer()
           if (lastErrorCode == "STYLE_LAYER_ID_CONFLICT") {
@@ -156,6 +188,8 @@ internal class AnimatedEntitiesController(
         "getDiagnostics" -> result.success(diagnostics())
         else -> result.notImplemented()
       }
+    } catch (error: GlbException) {
+      result.error(error.code, "The GLB cannot be used by this native probe.", null)
     } catch (_: IllegalArgumentException) {
       result.error("INVALID_ARGUMENTS", "The cube command has invalid fields.", null)
     } catch (error: CubeStyleException) {
@@ -193,17 +227,122 @@ internal class AnimatedEntitiesController(
     return value
   }
 
+  private fun attachRiggedModel(arguments: Map<*, *>, result: MethodChannel.Result) {
+    fun number(key: String): Double {
+      val value = arguments[key]
+      require(value is Double && value.isFinite())
+      return value
+    }
+    val bytes = arguments["glbBytes"]
+    require(bytes is ByteArray)
+    if (bytes.size > RiggedGlbLoader.MAX_BYTES) throw GlbException("GLB_TOO_LARGE")
+    val latitude = number("latitude")
+    val longitude = number("longitude")
+    val altitude = number("altitudeMeters")
+    val height = number("heightMeters")
+    val heading = number("headingDegrees")
+    val rate = number("playbackRate")
+    val index = arguments["clipIndex"]
+    require(index is Int || index is Long)
+    val clipIndex = (index as Number).toLong()
+    val nextPaused = readPaused(arguments)
+    require(latitude in -MERCATOR_LATITUDE_LIMIT..MERCATOR_LATITUDE_LIMIT && longitude in -180.0..180.0)
+    require(height > 0.0 && rate in 0.0..4.0 && clipIndex in 0..Int.MAX_VALUE.toLong())
+    cancelPendingLoad("LOAD_SUPERSEDED")
+    modelRequested = true
+    modelLoadError = null
+    val generation = loadGeneration
+    loadResult = result
+    loadTask = loader.submit {
+      var decoded: RiggedModelState? = null
+      var failure: String? = null
+      try {
+        val model = RiggedGlbLoader.decode(bytes)
+        if (clipIndex >= model.clips.size) throw GlbException("INVALID_ARGUMENTS")
+        decoded = RiggedModelState(model, latitude, longitude, altitude, height, heading, clipIndex.toInt(), rate)
+      } catch (error: GlbException) {
+        failure = error.code
+      } catch (_: RuntimeException) {
+        failure = "GLB_INVALID"
+      }
+      val accepted = decoded
+      val errorCode = failure
+      mainHandler.post {
+        if (disposed || generation != loadGeneration) return@post
+        val response = loadResult ?: return@post
+        loadResult = null
+        loadTask = null
+        if (errorCode != null || accepted == null) {
+          val code = errorCode ?: "GLB_INVALID"
+          modelLoadError = code
+          response.error(code, "The GLB could not be decoded.", null)
+          return@post
+        }
+        try {
+          // No existing scene/model is replaced until CPU validation succeeds.
+          removeLayer()
+          cube.set(null)
+          rigged.set(accepted)
+          paused = nextPaused
+          previousFrameNanos = 0L
+          lastErrorCode = null
+          modelLoadError = null
+          installLayerIfNeeded()
+          updateRepaint()
+          mapboxMap.triggerRepaint()
+          // Acknowledges CPU acceptance. Only diagnostics can prove GPU readiness.
+          response.success(null)
+        } catch (error: CubeStyleException) {
+          lastErrorCode = error.code
+          stopRepaint()
+          response.error(error.code, "The native model layer could not be updated.", null)
+        } catch (_: RuntimeException) {
+          lastErrorCode = "STYLE_LAYER_ADD_FAILED"
+          stopRepaint()
+          response.error("STYLE_LAYER_ADD_FAILED", "The native model layer could not be added.", null)
+        }
+      }
+    }
+  }
+
+  private fun cancelPendingLoad(code: String) {
+    loadGeneration++
+    loadTask?.cancel(true)
+    loadTask = null
+    loader.purge()
+    loadResult?.error(code, "The native model load did not remain active.", null)
+    loadResult = null
+  }
+
+  private fun hasActiveProbe(): Boolean = cube.get() != null || rigged.get() != null
+
+  private fun ownsCurrentStyleHost(): Boolean =
+    host != null && ownedHostStyleGeneration == styleGeneration.get()
+
+  private fun discardStaleHost() {
+    if (host != null && (!mapboxMap.isStyleLoaded() || !ownsCurrentStyleHost())) {
+      // The SDK releases the old style's GPU resources through deinitialize.
+      // Never remove an ID from the replacement style using stale ownership.
+      host = null
+      ownedHostStyleGeneration = -1L
+    }
+  }
+
   private fun installLayerIfNeeded() {
-    if (disposed || cube.get() == null || !mapboxMap.isStyleLoaded()) return
+    discardStaleHost()
+    if (disposed || !hasActiveProbe() || !mapboxMap.isStyleLoaded()) return
     val style = mapboxMap.styleManager
     if (style.styleLayerExists(LAYER_ID)) {
-      if (host == null) throw CubeStyleException("STYLE_LAYER_ID_CONFLICT")
+      if (!ownsCurrentStyleHost()) throw CubeStyleException("STYLE_LAYER_ID_CONFLICT")
       return
     }
-    val nextHost = CubeCustomLayerHost(cube, renderedFrames)
+    val generation = styleGeneration.get()
+    val model = rigged.get()
+    val nextHost: ProbeGlesHost = if (model != null) RiggedModelLayerHost(rigged, model) else CubeCustomLayerHost(cube, renderedFrames)
     val added = style.addStyleCustomLayer(LAYER_ID, nextHost, null)
     if (added.isError) throw CubeStyleException("STYLE_LAYER_ADD_FAILED")
     host = nextHost
+    ownedHostStyleGeneration = generation
     val positioned = style.setStyleLayerProperty(LAYER_ID, "slot", Value.valueOf("top"))
     if (positioned.isError) throw CubeStyleException("STYLE_LAYER_POSITION_FAILED")
     lastErrorCode = null
@@ -212,7 +351,8 @@ internal class AnimatedEntitiesController(
   private fun removeLayer() {
     // A style may already contain this reserved ID. An attach conflict never
     // gives this controller ownership of that unrelated layer.
-    if (host == null) return
+    discardStaleHost()
+    if (!ownsCurrentStyleHost() || !mapboxMap.isStyleLoaded()) return
     val style = mapboxMap.styleManager
     if (style.styleLayerExists(LAYER_ID)) {
       val removed = style.removeStyleLayer(LAYER_ID)
@@ -220,13 +360,14 @@ internal class AnimatedEntitiesController(
     }
     // GPU deletion belongs to CustomLayerHost.deinitialize, on the render thread.
     host = null
+    ownedHostStyleGeneration = -1L
   }
 
   private fun canRepaint(): Boolean =
-    !disposed && viewAttached && !paused && cube.get() != null &&
-      cube.get()?.rotationDegreesPerSecond != 0.0 &&
+    !disposed && viewAttached && !paused && hasActiveProbe() &&
+      ((rigged.get()?.playbackRate ?: 0.0) > 0.0 || (cube.get()?.rotationDegreesPerSecond ?: 0.0) != 0.0) &&
       lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) == true &&
-      host != null && host?.lastErrorCode?.get() == null && lastErrorCode == null &&
+      ownsCurrentStyleHost() && host?.lastErrorCode?.get() == null && lastErrorCode == null &&
       mapboxMap.isStyleLoaded() && mapboxMap.styleManager.styleLayerExists(LAYER_ID)
 
   private fun updateRepaint() {
@@ -252,18 +393,44 @@ internal class AnimatedEntitiesController(
     "attached" to (cube.get() != null),
     "paused" to paused,
     "styleLayerPresent" to mapboxMap.styleManager.styleLayerExists(LAYER_ID),
-    "initialized" to (host?.initialized?.get() == true),
-    "repaintEnabled" to canRepaint(),
+    "initialized" to (cube.get() != null && host is CubeCustomLayerHost && ownsCurrentStyleHost() && mapboxMap.isStyleLoaded() && host?.initialized?.get() == true),
+    "repaintEnabled" to (cube.get() != null && host is CubeCustomLayerHost && canRepaint()),
     "renderedFrames" to renderedFrames.get(),
     "lastErrorCode" to (lastErrorCode ?: host?.lastErrorCode?.get()),
     "incomingGlErrorCode" to host?.incomingGlErrorCode?.get(),
     "supportsSkeletalAnimation" to false,
   )
 
+  private fun riggedDiagnostics(): Map<String, Any?> {
+    val state = rigged.get()
+    val modelHost = if (ownsCurrentStyleHost() && mapboxMap.isStyleLoaded()) host as? RiggedModelLayerHost else null
+    return mapOf(
+      "protocolVersion" to PROTOCOL_VERSION,
+      "backend" to "androidGLES",
+      "requested" to modelRequested,
+      "ready" to (state != null && modelHost != null && modelHost.initialized.get() && modelHost.lastErrorCode.get() == null),
+      "paused" to paused,
+      "repaintEnabled" to (state != null && canRepaint()),
+      "renderedFrames" to (state?.renderedFrames?.get() ?: 0L),
+      "poseRevision" to (state?.poseRevision?.get() ?: 0L),
+      "animationTimeSeconds" to (state?.animationTimeSeconds ?: 0.0),
+      "vertexCount" to (state?.model?.vertexCount ?: 0),
+      "jointCount" to (state?.model?.jointNodes?.size ?: 0),
+      "clipCount" to (state?.model?.clips?.size ?: 0),
+      "clipIndex" to (state?.clipIndex ?: 0),
+      "lastErrorCode" to (modelLoadError ?: lastErrorCode ?: modelHost?.lastErrorCode?.get()),
+      "incomingGlErrorCode" to modelHost?.incomingGlErrorCode?.get(),
+    )
+  }
+
   fun dispose() {
     if (disposed) return
     disposed = true
+    cancelPendingLoad("MAP_DISPOSED")
+    loader.shutdownNow()
     cube.set(null)
+    rigged.set(null)
+    modelRequested = false
     stopRepaint()
     styleSubscription.cancel()
     lifecycle?.removeObserver(this)

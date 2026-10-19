@@ -7,10 +7,14 @@ mesh, one skin with two joints and one **unnamed** animation at index `0`.
 The animation drives translation, rotation and scale. Do not invent an `idle`,
 `walk` or other named clip for this fixture.
 
-This fixture is staged beside the isolated fork's native P0 cube work. It is not
-registered as a Flutter asset and is not loaded by the current cube probe. The
-validator establishes file integrity and the listed GLB structure; native model
-loading, skeletal playback, map anchoring and rendering have not been verified.
+The unchanged fixture is also registered in the SDK example's
+`assets/animated_entities/` directory. The separate native rigged-model probe now
+loads it, evaluates its skeleton and renders anchored pose changes on Android
+GLES and iOS Metal. Visible GPU pose A/B passed on emulator/simulator; physical
+devices remain unverified. The cube probe remains separate and does not load
+models. See [the P0C API, runtime evidence and limits](../../docs/GLTF_ANIMATION_P0.md).
+This offline validator establishes file integrity and GLB structure; it does not
+establish native rendering correctness.
 
 ## Attribution and provenance
 

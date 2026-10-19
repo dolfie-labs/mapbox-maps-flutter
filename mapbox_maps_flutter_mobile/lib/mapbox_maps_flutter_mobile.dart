@@ -33,6 +33,7 @@ part 'src/internal/style_image_conversions.dart';
 part 'src/internal/point_annotation_icon_image.dart';
 part 'src/mapbox_map.dart';
 part 'src/native_custom_layer_probe.dart';
+part 'src/native_rigged_model_probe.dart';
 part 'src/mapbox_maps_options.dart';
 part 'src/mapbox_maps_platform.dart';
 part 'src/pigeons/circle_annotation_messenger.dart';

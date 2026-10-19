@@ -46,6 +46,7 @@ flutter:
     - assets/
     - assets/symbols/
     - assets/cluster/
+    - assets/animated_entities/
 
 # Minimum config patrol_cli requires. The web suite is driven via Playwright
 # and does not use these platform blocks; app_name is display-only on web.

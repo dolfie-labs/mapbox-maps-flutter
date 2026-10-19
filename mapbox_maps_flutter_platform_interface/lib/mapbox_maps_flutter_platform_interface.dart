@@ -18,6 +18,7 @@ export 'src/public/interactive_features.dart';
 export 'src/public/log_writer_backend.dart';
 export 'src/public/map_keyboard_gesture_context.dart';
 export 'src/public/native_custom_layer_probe.dart';
+export 'src/public/native_rigged_model_probe.dart';
 export 'src/public/offline_progress_listeners.dart';
 export 'src/public/performance_statistics_listener.dart';
 export 'src/public/style_image.dart';

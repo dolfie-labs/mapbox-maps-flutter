@@ -26,6 +26,7 @@ import 'platform/debug_options_example.dart';
 import 'platform/map_interface_example.dart';
 import 'platform/map_recorder_example.dart';
 import 'platform/native_custom_layer_probe_example.dart';
+import 'platform/native_rigged_model_probe_example.dart';
 import 'styles/indoor_example.dart';
 import 'styles/model_comparison_example.dart';
 import 'styles/sources_example.dart';
@@ -277,6 +278,14 @@ final List<Example> examples = [
     ),
   // These APIs have no web implementation.
   if (isMobile) ...[
+    Example(
+      slug: 'native_rigged_model_probe',
+      category: ExampleCategory.platform,
+      leading: const Icon(Icons.accessibility_new),
+      title: 'Native rigged model probe',
+      subtitle: 'Free Rigged Simple GLB; one unnamed skeletal animation clip.',
+      builder: (_) => const NativeRiggedModelProbeExample(),
+    ),
     Example(
       slug: 'native_custom_layer_probe',
       category: ExampleCategory.platform,

@@ -7,15 +7,23 @@ import QuartzCore
 import simd
 import UIKit
 
-/// P0 cube experiment, scoped to one existing MapView. This is not a GLB scene.
+/// One map-scoped P0 native probe, with additive cube and bounded GLB commands.
 final class MoveyAnimatedEntitiesHost: NSObject {
     private static let protocolVersion = 1
     private static let layerId = "movey-animated-entities-p0-cube-v1"
     private static let mercatorLatitudeLimit = 85.05112878
-
     private weak var mapView: MapView?
     private let channel: FlutterMethodChannel
     private let renderer = MoveyCubeRenderer()
+    private let riggedRenderer = MoveyRiggedModelRenderer()
+    private let decodeQueue = DispatchQueue(label: "dev.movey.mapbox.glb-decode", qos: .userInitiated)
+    private var loadGeneration = 0
+    private var cancellation: MoveyGLBCancellation?
+    private var pendingResult: FlutterResult?
+    private var requestedModel = false
+    private var activeRigged = false
+    private var modelPlaybackRate = 0.0
+    private var modelLoadError: String?
     private var styleSubscription: AnyCancelable?
     private var notificationTokens: [NSObjectProtocol] = []
     private var displayLink: CADisplayLink?
@@ -29,48 +37,34 @@ final class MoveyAnimatedEntitiesHost: NSObject {
 
     init(mapView: MapView, messenger: FlutterBinaryMessenger, channelSuffix: String) {
         self.mapView = mapView
-        channel = FlutterMethodChannel(
-            name: "dev.movey.mapbox.animated_entities.v1.\(channelSuffix)",
-            binaryMessenger: messenger
-        )
+        channel = FlutterMethodChannel(name: "dev.movey.mapbox.animated_entities.v1.\(channelSuffix)", binaryMessenger: messenger)
         super.init()
-
         channel.setMethodCallHandler { [weak self] call, result in
-            guard let self else {
-                result(FlutterError(code: "MAP_DISPOSED", message: "The map has been disposed.", details: nil))
-                return
-            }
+            guard let self else { result(FlutterError(code: "MAP_DISPOSED", message: "The map has been disposed.", details: nil)); return }
             self.handle(call, result: result)
         }
         styleSubscription = mapView.mapboxMap.onStyleLoaded.observe { [weak self] _ in
-            // Our non-persistent layer belonged to the previous style. A layer
-            // with this ID in the newly loaded style does not belong to us.
             self?.ownsLayer = false
             self?.restoreLayer()
         }
         notificationTokens.append(NotificationCenter.default.addObserver(
             forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.foreground = false
-            self?.syncRepaint()
-        })
+        ) { [weak self] _ in self?.foreground = false; self?.syncRepaint() })
         notificationTokens.append(NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.foreground = true
-            self?.syncRepaint()
-        })
+        ) { [weak self] _ in self?.foreground = true; self?.syncRepaint() })
     }
 
-    deinit {
-        dispose()
-    }
+    deinit { dispose() }
 
     func dispose() {
         guard !disposed else { return }
         disposed = true
+        cancelLoad(code: "MAP_DISPOSED")
         attached = false
+        requestedModel = false
         renderer.detach()
+        riggedRenderer.detach()
         stopRepaint()
         styleSubscription?.cancel()
         styleSubscription = nil
@@ -82,164 +76,200 @@ final class MoveyAnimatedEntitiesHost: NSObject {
     }
 
     private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        guard !disposed, mapView != nil else {
-            result(FlutterError(code: "MAP_DISPOSED", message: "The map has been disposed.", details: nil))
-            return
-        }
-        guard let arguments = call.arguments as? [String: Any] else {
-            result(FlutterError(code: "INVALID_ARGUMENTS", message: "A command argument map is required.", details: nil))
-            return
-        }
-        guard let version = number(arguments, "protocolVersion"),
-              version == Double(Self.protocolVersion) else {
-            result(FlutterError(code: "PROTOCOL_VERSION_UNSUPPORTED", message: "protocolVersion must be 1.", details: nil))
-            return
+        guard !disposed, mapView != nil else { result(error("MAP_DISPOSED", "The map has been disposed.")); return }
+        guard let arguments = call.arguments as? [String: Any] else { result(error("INVALID_ARGUMENTS", "A command argument map is required.")); return }
+        guard let version = number(arguments, "protocolVersion"), version == Double(Self.protocolVersion) else {
+            result(error("PROTOCOL_VERSION_UNSUPPORTED", "protocolVersion must be 1.")); return
         }
         switch call.method {
         case "attachCube":
-            guard let latitude = number(arguments, "latitude"),
-                  abs(latitude) <= Self.mercatorLatitudeLimit,
+            guard let latitude = number(arguments, "latitude"), abs(latitude) <= Self.mercatorLatitudeLimit,
                   let longitude = number(arguments, "longitude"), abs(longitude) <= 180,
-                  let altitude = number(arguments, "altitudeMeters"),
-                  let size = number(arguments, "sizeMeters"), size > 0,
-                  let heading = number(arguments, "headingDegrees"),
-                  let rotation = number(arguments, "rotationDegreesPerSecond"),
+                  let altitude = number(arguments, "altitudeMeters"), let size = number(arguments, "sizeMeters"), size > 0,
+                  let heading = number(arguments, "headingDegrees"), let rotation = number(arguments, "rotationDegreesPerSecond"),
                   let paused = boolean(arguments, "paused") else {
-                result(FlutterError(code: "INVALID_ARGUMENTS", message: "A cube requires finite Mercator coordinates, a positive size and a paused flag.", details: nil))
-                return
+                result(error("INVALID_ARGUMENTS", "A cube requires finite Mercator coordinates, a positive size and a paused flag.")); return
             }
-            let retryResources = renderer.diagnostics().lastErrorCode != nil
-            renderer.configure(MoveyCubeConfiguration(
-                latitude: latitude, longitude: longitude, altitudeMeters: altitude,
-                sizeMeters: size, headingDegrees: heading,
-                rotationDegreesPerSecond: rotation
-            ))
+            cancelLoad(code: "LOAD_SUPERSEDED")
+            let needsReplacement = activeRigged || renderer.diagnostics().lastErrorCode != nil
+            if needsReplacement, let failure = removeLayer() { result(failure); return }
+            riggedRenderer.detach()
+            activeRigged = false
+            requestedModel = false
+            modelLoadError = nil
+            renderer.configure(MoveyCubeConfiguration(latitude: latitude, longitude: longitude, altitudeMeters: altitude,
+                                                      sizeMeters: size, headingDegrees: heading, rotationDegreesPerSecond: rotation))
             attached = true
             requestedPaused = paused
             rotationDegreesPerSecond = rotation
-            if retryResources, let error = removeLayer() {
-                result(error)
-                return
-            }
-            if let error = installLayerIfReady() {
-                result(error)
-                return
-            }
+            if let failure = installLayerIfReady() { result(failure); return }
             syncRepaint()
             result(nil)
+        case "attachRiggedModel":
+            attachRiggedModel(arguments, result: result)
         case "setPaused":
-            guard let paused = boolean(arguments, "paused") else {
-                result(FlutterError(code: "INVALID_ARGUMENTS", message: "paused must be a boolean.", details: nil))
-                return
-            }
+            guard let paused = boolean(arguments, "paused") else { result(error("INVALID_ARGUMENTS", "paused must be a boolean.")); return }
             requestedPaused = paused
             syncRepaint()
             result(nil)
         case "detach":
+            cancelLoad(code: "LOAD_SUPERSEDED")
             attached = false
+            requestedModel = false
+            modelLoadError = nil
             renderer.detach()
+            riggedRenderer.detach()
             stopRepaint()
-            if let error = removeLayer() {
-                result(error)
-            } else {
-                result(nil)
-            }
+            result(removeLayer())
         case "getDiagnostics":
             let state = renderer.diagnostics()
-            result([
-                "protocolVersion": Self.protocolVersion,
-                "backend": "iosMetal",
-                "attached": attached,
-                "paused": requestedPaused,
-                "styleLayerPresent": ownsLayer && mapView?.mapboxMap.layerExists(withId: Self.layerId) == true,
-                "initialized": state.initialized,
-                "repaintEnabled": displayLink != nil,
-                "renderedFrames": state.renderedFrames,
-                "lastErrorCode": state.lastErrorCode.map { $0 as Any } ?? NSNull(),
-                "supportsSkeletalAnimation": false
-            ])
-        default:
-            result(FlutterMethodNotImplemented)
+            result(["protocolVersion": Self.protocolVersion, "backend": "iosMetal", "attached": attached && !activeRigged,
+                    "paused": requestedPaused, "styleLayerPresent": ownsLayer && mapView?.mapboxMap.layerExists(withId: Self.layerId) == true,
+                    "initialized": !activeRigged && state.initialized, "repaintEnabled": !activeRigged && displayLink != nil,
+                    "renderedFrames": state.renderedFrames, "lastErrorCode": state.lastErrorCode.map { $0 as Any } ?? NSNull(),
+                    "supportsSkeletalAnimation": false])
+        case "getRiggedModelDiagnostics":
+            let state = riggedRenderer.diagnostics()
+            let failure = modelLoadError ?? state.lastErrorCode
+            result(["protocolVersion": Self.protocolVersion, "backend": "iosMetal", "requested": requestedModel,
+                    "ready": attached && activeRigged && state.ready, "paused": requestedPaused,
+                    "repaintEnabled": activeRigged && displayLink != nil, "renderedFrames": state.renderedFrames,
+                    "poseRevision": state.poseRevision, "animationTimeSeconds": state.animationTimeSeconds,
+                    "vertexCount": state.vertexCount, "jointCount": state.jointCount, "clipCount": state.clipCount,
+                    "clipIndex": state.clipIndex, "lastErrorCode": failure.map { $0 as Any } ?? NSNull(),
+                    "incomingGlErrorCode": NSNull()])
+        default: result(FlutterMethodNotImplemented)
         }
     }
 
-    private func number(_ arguments: [String: Any], _ key: String) -> Double? {
-        guard let value = arguments[key] as? NSNumber,
-              CFGetTypeID(value) != CFBooleanGetTypeID(), value.doubleValue.isFinite else { return nil }
-        return value.doubleValue
+    private func attachRiggedModel(_ arguments: [String: Any], result: @escaping FlutterResult) {
+        guard let bytes = arguments["glbBytes"] as? FlutterStandardTypedData,
+              let latitude = number(arguments, "latitude"), abs(latitude) <= Self.mercatorLatitudeLimit,
+              let longitude = number(arguments, "longitude"), abs(longitude) <= 180,
+              let altitude = number(arguments, "altitudeMeters"), let height = number(arguments, "heightMeters"), height > 0,
+              let heading = number(arguments, "headingDegrees"), let clip = number(arguments, "clipIndex"),
+              clip.rounded(.towardZero) == clip, clip >= 0, clip <= Double(Int32.max),
+              let rate = number(arguments, "playbackRate"), rate >= 0, rate <= 4,
+              let paused = boolean(arguments, "paused") else {
+            result(error("INVALID_ARGUMENTS", "A rigged model requires GLB bytes, finite Mercator placement, a positive height, clip index and playback rate in [0, 4].")); return
+        }
+        guard bytes.data.count <= MoveyGLBDecoder.maximumBytes else { result(error("GLB_TOO_LARGE", "A probe GLB must be at most 2 MiB.")); return }
+        cancelLoad(code: "LOAD_SUPERSEDED")
+        let generation = loadGeneration
+        let token = MoveyGLBCancellation()
+        cancellation = token
+        pendingResult = result
+        requestedModel = true
+        modelLoadError = nil
+        let data = bytes.data
+        let configuration = MoveyRiggedConfiguration(latitude: latitude, longitude: longitude, altitudeMeters: altitude,
+                                                     heightMeters: height, headingDegrees: heading, clipIndex: Int(clip), playbackRate: rate)
+        decodeQueue.async { [weak self] in
+            let decoded: Result<MoveyRiggedAsset, Error> = Result {
+                let asset = try MoveyGLBDecoder.decode(data, cancellation: token)
+                guard asset.clips.indices.contains(configuration.clipIndex) else { throw MoveyGLBFailure.invalid("clipIndex is outside the GLB clips.") }
+                return asset
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.disposed, self.loadGeneration == generation else { return }
+                self.cancellation = nil
+                guard let completion = self.pendingResult else { return }
+                self.pendingResult = nil
+                switch decoded {
+                case .failure(let failure):
+                    let typed = failure as? MoveyGLBFailure ?? .invalid("The GLB JSON or binary content is invalid.")
+                    self.modelLoadError = typed.code
+                    completion(self.error(typed.code, typed.message))
+                case .success(let asset):
+                    // CPU acceptance is transactional: failed decoding never removes the old probe.
+                    if self.attached, !self.activeRigged, let failure = self.removeLayer() {
+                        self.modelLoadError = failure.code
+                        completion(failure)
+                        return
+                    }
+                    // Existing model layer can reuse its render context; GPU buffers are
+                    // replaced on the next native render callback, never on this queue.
+                    self.renderer.detach()
+                    self.riggedRenderer.configure(asset: asset, configuration: configuration)
+                    self.activeRigged = true
+                    self.attached = true
+                    self.requestedPaused = paused
+                    self.modelPlaybackRate = rate
+                    self.modelLoadError = nil
+                    if let failure = self.installLayerIfReady() { completion(failure); return }
+                    self.syncRepaint()
+                    // A successful command means CPU accepted. Diagnostics.ready is only
+                    // set by the render callback after real Metal buffers are allocated.
+                    completion(nil)
+                }
+            }
+        }
     }
 
+    private func cancelLoad(code: String) {
+        loadGeneration += 1
+        cancellation?.cancel()
+        cancellation = nil
+        let completion = pendingResult
+        pendingResult = nil
+        completion?(error(code, code == "MAP_DISPOSED" ? "The map has been disposed." : "The model load was superseded."))
+    }
+
+    private func error(_ code: String, _ message: String) -> FlutterError { FlutterError(code: code, message: message, details: nil) }
+    private func number(_ arguments: [String: Any], _ key: String) -> Double? {
+        guard let value = arguments[key] as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(), value.doubleValue.isFinite else { return nil }
+        return value.doubleValue
+    }
     private func boolean(_ arguments: [String: Any], _ key: String) -> Bool? {
-        guard let value = arguments[key] as? NSNumber,
-              CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
+        guard let value = arguments[key] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
         return value.boolValue
+    }
+    private var activeError: String? { activeRigged ? riggedRenderer.diagnostics().lastErrorCode : renderer.diagnostics().lastErrorCode }
+    private func recordActiveError(_ code: String) {
+        if activeRigged { riggedRenderer.recordError(code) } else { renderer.recordError(code) }
     }
 
     private func restoreLayer() {
         guard !disposed, attached else { return }
-        if let error = installLayerIfReady() {
-            // No pending Flutter command exists during a style callback; retain
-            // the typed error in diagnostics and stop the native repaint loop.
-            renderer.recordError(error.code)
-            stopRepaint()
-            return
-        }
+        if let failure = installLayerIfReady() { recordActiveError(failure.code); stopRepaint(); return }
         syncRepaint()
     }
-
     private func installLayerIfReady() -> FlutterError? {
         guard attached, let map = mapView?.mapboxMap, map.isStyleLoaded else { return nil }
         if map.layerExists(withId: Self.layerId) {
             guard ownsLayer else {
-                renderer.recordError("STYLE_LAYER_ID_CONFLICT")
+                recordActiveError("STYLE_LAYER_ID_CONFLICT")
                 stopRepaint()
-                return FlutterError(code: "STYLE_LAYER_ID_CONFLICT", message: "The cube layer ID belongs to the caller's style.", details: nil)
+                return error("STYLE_LAYER_ID_CONFLICT", "The probe layer ID belongs to the caller's style.")
             }
             return nil
         }
         ownsLayer = false
         do {
-            // Add one layer without replacing the caller's MapStyleContent.
-            try map.addLayer(CustomLayer(id: Self.layerId, renderer: renderer))
+            let layerRenderer: CustomLayerHost = activeRigged ? riggedRenderer : renderer
+            try map.addLayer(CustomLayer(id: Self.layerId, renderer: layerRenderer))
             ownsLayer = true
             return nil
         } catch {
-            renderer.recordError("STYLE_LAYER_ADD_FAILED")
+            recordActiveError("STYLE_LAYER_ADD_FAILED")
             stopRepaint()
-            return FlutterError(code: "STYLE_LAYER_ADD_FAILED", message: "The native custom layer could not be attached.", details: nil)
+            return self.error("STYLE_LAYER_ADD_FAILED", "The native custom layer could not be attached.")
         }
     }
-
-    @discardableResult
-    private func removeLayer() -> FlutterError? {
+    @discardableResult private func removeLayer() -> FlutterError? {
         guard ownsLayer else { return nil }
-        guard let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId) else {
-            ownsLayer = false
-            return nil
-        }
-        do {
-            try map.removeLayer(withId: Self.layerId)
-            ownsLayer = false
-            return nil
-        } catch {
-            renderer.recordError("STYLE_LAYER_REMOVE_FAILED")
-            return FlutterError(code: "STYLE_LAYER_REMOVE_FAILED", message: "The native custom layer could not be removed.", details: nil)
-        }
+        guard let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId) else { ownsLayer = false; return nil }
+        do { try map.removeLayer(withId: Self.layerId); ownsLayer = false; return nil }
+        catch { recordActiveError("STYLE_LAYER_REMOVE_FAILED"); return self.error("STYLE_LAYER_REMOVE_FAILED", "The native custom layer could not be removed.") }
     }
-
     private func syncRepaint() {
         renderer.setPaused(requestedPaused || !foreground)
+        riggedRenderer.setPaused(requestedPaused || !foreground)
         guard !disposed, attached, foreground, ownsLayer,
-              let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId),
-              renderer.diagnostics().lastErrorCode == nil else {
-            stopRepaint()
-            return
-        }
+              let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId), activeError == nil else { stopRepaint(); return }
         map.triggerRepaint()
-        guard !requestedPaused, rotationDegreesPerSecond != 0 else {
-            stopRepaint()
-            return
-        }
+        let advances = activeRigged ? modelPlaybackRate > 0 : rotationDegreesPerSecond != 0
+        guard !requestedPaused, advances else { stopRepaint(); return }
         guard displayLink == nil else { return }
         let target = MoveyCubeDisplayLinkTarget(host: self)
         let link = CADisplayLink(target: target, selector: #selector(MoveyCubeDisplayLinkTarget.tick))
@@ -248,22 +278,12 @@ final class MoveyAnimatedEntitiesHost: NSObject {
         displayLink = link
         link.add(to: .main, forMode: .common)
     }
-
     fileprivate func repaint() {
         guard !disposed, attached, foreground, ownsLayer, !requestedPaused,
-              let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId),
-              renderer.diagnostics().lastErrorCode == nil else {
-            stopRepaint()
-            return
-        }
+              let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId), activeError == nil else { stopRepaint(); return }
         map.triggerRepaint()
     }
-
-    private func stopRepaint() {
-        displayLink?.invalidate()
-        displayLink = nil
-        displayLinkTarget = nil
-    }
+    private func stopRepaint() { displayLink?.invalidate(); displayLink = nil; displayLinkTarget = nil }
 }
 
 /// CADisplayLink retains its target, so this proxy must only weakly own the host.
@@ -445,45 +465,9 @@ private final class MoveyCubeRenderer: NSObject, CustomLayerHost {
     }
 
     private func modelViewProjection(_ parameters: CustomLayerRenderParameters, configuration: MoveyCubeConfiguration, headingDegrees: Double) -> simd_float4x4? {
-        let location = CLLocationCoordinate2D(latitude: configuration.latitude, longitude: configuration.longitude)
-        let mercator = MapboxMaps.Projection.latLngToMercatorXY(coordinate: location)
-        let worldSize = MapboxMaps.Projection.worldSize(scale: pow(2, parameters.zoom))
-        let pixelsPerMeter = 1 / MapboxMaps.Projection.metersPerPoint(for: configuration.latitude, zoom: parameters.zoom)
-        let heightScale = MapboxMaps.Projection.getLatitudeScale(parameters.latitude) / MapboxMaps.Projection.getLatitudeScale(configuration.latitude)
-        var translation = matrix_identity_double4x4
-        translation.columns.3 = SIMD4(mercator.x * worldSize, mercator.y * worldSize, configuration.altitudeMeters * heightScale, 1)
-        var scale = matrix_identity_double4x4
-        scale.columns.0.x = configuration.sizeMeters * pixelsPerMeter
-        scale.columns.1.y = configuration.sizeMeters * pixelsPerMeter
-        scale.columns.2.z = configuration.sizeMeters * heightScale
-        let angle = headingDegrees.truncatingRemainder(dividingBy: 360) * .pi / 180
-        let rotation = simd_double4x4(columns: (
-            SIMD4(cos(angle), sin(angle), 0, 0),
-            SIMD4(-sin(angle), cos(angle), 0, 0),
-            SIMD4(0, 0, 1, 0), SIMD4(0, 0, 0, 1)
-        ))
-        let model = translation * scale * rotation
-        let numbers = (0..<4).flatMap { column in (0..<4).map { row in NSNumber(value: model[column][row]) } }
-        guard numbers.allSatisfy({ $0.doubleValue.isFinite }),
-              let converted = parameters.projection.convertMercatorModelMatrix(forMatrix: numbers, ignoreDistortion: false),
-              let world = doubleMatrix(converted), let projection = doubleMatrix(parameters.projectionMatrix) else { return nil }
-        // Keep geographic translations in Double until MVP multiplication avoids
-        // subtracting large world coordinates in a Float vertex shader.
-        let result = projection * world
-        let columns = (0..<4).map { column in SIMD4<Float>(
-            Float(result[column][0]), Float(result[column][1]), Float(result[column][2]), Float(result[column][3])
-        ) }
-        guard columns.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite && $0.w.isFinite }) else { return nil }
-        return simd_float4x4(columns: (columns[0], columns[1], columns[2], columns[3]))
-    }
-
-    private func doubleMatrix(_ numbers: [NSNumber]) -> simd_double4x4? {
-        guard numbers.count == 16, numbers.allSatisfy({ $0.doubleValue.isFinite }) else { return nil }
-        let columns = (0..<4).map { column in SIMD4<Double>(
-            numbers[column * 4].doubleValue, numbers[column * 4 + 1].doubleValue,
-            numbers[column * 4 + 2].doubleValue, numbers[column * 4 + 3].doubleValue
-        ) }
-        return simd_double4x4(columns: (columns[0], columns[1], columns[2], columns[3]))
+        MoveyGeographicMatrix.make(parameters, latitude: configuration.latitude, longitude: configuration.longitude,
+                                  altitudeMeters: configuration.altitudeMeters, sizeMeters: configuration.sizeMeters,
+                                  headingDegrees: headingDegrees)
     }
 
     private static func cubeVertices() -> [Vertex] {

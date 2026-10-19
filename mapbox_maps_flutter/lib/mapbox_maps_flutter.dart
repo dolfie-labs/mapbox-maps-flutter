@@ -33,6 +33,7 @@ export 'src/style_manager.dart';
 export 'src/interactions.dart';
 export 'src/mapbox_map.dart';
 export 'src/native_custom_layer_probe.dart';
+export 'src/native_rigged_model_probe.dart';
 export 'src/mapbox_styles.dart';
 export 'src/interactive_features/standard_buildings.dart';
 export 'src/interactive_features/standard_place_labels.dart';

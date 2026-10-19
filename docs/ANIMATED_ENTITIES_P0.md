@@ -1,5 +1,9 @@
 # Native custom-layer P0 draft
 
+> This document records the historical P0B cube snapshot. For the implemented
+> rigged GLB renderer, current evidence and remaining limits, see
+> [Native rigged animation P0C](GLTF_ANIMATION_P0.md).
+
 ## Status
 
 This patch adds a compile-intended **cube feasibility probe** and an offline

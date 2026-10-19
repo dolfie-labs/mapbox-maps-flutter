@@ -16,6 +16,7 @@ import 'location_settings.dart';
 import 'logo_settings.dart';
 import 'map_recorder.dart';
 import 'native_custom_layer_probe.dart';
+import 'native_rigged_model_probe.dart';
 import 'projection.dart';
 import 'scale_bar_settings.dart';
 import 'style_manager.dart';
@@ -50,6 +51,21 @@ base class MapboxMap extends StyleManager implements MapboxMapInterface {
   }
 
   // ===== Sub-interfaces =====
+
+  /// Optional one-model native GLB probe; unsupported platforms fail explicitly.
+  @experimental
+  late final NativeRiggedModelProbe nativeRiggedModelProbe =
+      _createNativeRiggedModelProbe();
+
+  NativeRiggedModelProbe _createNativeRiggedModelProbe() {
+    final implementation = _impl;
+    if (implementation is! NativeRiggedModelProbeProvider) {
+      throw UnsupportedError('Native rigged model probe is unavailable');
+    }
+    return NativeRiggedModelProbe(
+      (implementation as NativeRiggedModelProbeProvider).nativeRiggedModelProbe,
+    );
+  }
 
   /// Provides access to the map's style APIs.
   @Deprecated('Call style APIs on this map instance directly.')

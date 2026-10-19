@@ -2,7 +2,10 @@ part of 'package:mapbox_maps_flutter_mobile/mapbox_maps_flutter_mobile.dart';
 
 /// Controller for a single MapboxMap instance running on the host platform.
 class MapboxMap extends ChangeNotifier
-    implements MapboxMapPlatformInterface, NativeCustomLayerProbeProvider {
+    implements
+        MapboxMapPlatformInterface,
+        NativeCustomLayerProbeProvider,
+        NativeRiggedModelProbeProvider {
   MapboxMap._({required _MapboxMapsPlatform mapboxMapsPlatform})
     : _mapboxMapsPlatform = mapboxMapsPlatform {
     annotations = AnnotationManager._(mapboxMapsPlatform: _mapboxMapsPlatform);
@@ -31,6 +34,13 @@ class MapboxMap extends ChangeNotifier
   @override
   NativeCustomLayerProbePlatformInterface get nativeCustomLayerProbe =>
       _nativeCustomLayerProbe;
+
+  late final _NativeRiggedModelProbeChannel _nativeRiggedModelProbe =
+      _NativeRiggedModelProbeChannel(_nativeCustomLayerProbe);
+
+  @override
+  NativeRiggedModelProbePlatformInterface get nativeRiggedModelProbe =>
+      _nativeRiggedModelProbe;
 
   /// The currently loaded StyleManager object.
   @override
