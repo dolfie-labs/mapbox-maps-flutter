@@ -18,6 +18,7 @@ public final class MapboxMapController: NSObject, FlutterPlatformView {
     private let indoorController: IndoorController?
     private let eventHandler: MapboxEventHandler
     private let binaryMessenger: SuffixBinaryMessenger
+    private var moveyAnimatedEntitiesHost: MoveyAnimatedEntitiesHost?
 
     public func view() -> UIView {
         return mapView
@@ -128,6 +129,11 @@ public final class MapboxMapController: NSObject, FlutterPlatformView {
 
         super.init()
 
+        moveyAnimatedEntitiesHost = MoveyAnimatedEntitiesHost(
+            mapView: mapView,
+            messenger: binaryMessenger.messenger,
+            channelSuffix: binaryMessenger.suffix
+        )
         channel.setMethodCallHandler { [weak self] in self?.onMethodCall(methodCall: $0, result: $1) }
         channel.invokeMethod("mapView#onMapCreated", arguments: nil)
     }
@@ -215,6 +221,8 @@ public final class MapboxMapController: NSObject, FlutterPlatformView {
     }
 
     private func dispose() {
+        moveyAnimatedEntitiesHost?.dispose()
+        moveyAnimatedEntitiesHost = nil
         channel.setMethodCallHandler(nil)
         eventHandler.dispose()
 

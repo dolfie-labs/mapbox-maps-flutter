@@ -15,6 +15,7 @@ import 'indoor_selector_settings.dart';
 import 'location_settings.dart';
 import 'logo_settings.dart';
 import 'map_recorder.dart';
+import 'native_custom_layer_probe.dart';
 import 'projection.dart';
 import 'scale_bar_settings.dart';
 import 'style_manager.dart';
@@ -31,6 +32,22 @@ base class MapboxMap extends StyleManager implements MapboxMapInterface {
 
   @internal
   MapboxMap(this._impl) : super(_impl.style);
+
+  /// Optional native cube probe; unavailable on web and custom platforms that
+  /// do not implement the capability. It does not expose skeletal animation.
+  @experimental
+  late final NativeCustomLayerProbe nativeCustomLayerProbe =
+      _createNativeProbe();
+
+  NativeCustomLayerProbe _createNativeProbe() {
+    final implementation = _impl;
+    if (implementation is! NativeCustomLayerProbeProvider) {
+      throw UnsupportedError('Native custom-layer probe is unavailable');
+    }
+    return NativeCustomLayerProbe(
+      (implementation as NativeCustomLayerProbeProvider).nativeCustomLayerProbe,
+    );
+  }
 
   // ===== Sub-interfaces =====
 

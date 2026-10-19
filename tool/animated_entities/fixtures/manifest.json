@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "file": "RiggedSimple.glb",
+  "byte_length": 15104,
+  "sha256": "3a79dabb67bb0cd598a18d08b954d9d357c27c30672f82ef5d3f4e7fe6ca3401",
+  "upstream_git_blob_sha": "d56b94eef74fb085d7e7856a29cbafd0428fbfdc",
+  "source": {
+    "repository": "https://github.com/KhronosGroup/glTF-Sample-Assets",
+    "commit": "edc7c9e67c639d230715049ee31f9a96a6babbbe",
+    "path": "Models/RiggedSimple/glTF-Binary/RiggedSimple.glb",
+    "download_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/edc7c9e67c639d230715049ee31f9a96a6babbbe/Models/RiggedSimple/glTF-Binary/RiggedSimple.glb",
+    "readme_url": "https://github.com/KhronosGroup/glTF-Sample-Assets/blob/edc7c9e67c639d230715049ee31f9a96a6babbbe/Models/RiggedSimple/README.md"
+  },
+  "license": {
+    "spdx": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/legalcode",
+    "attribution": "Rigged Simple, © 2017 Cesium. Creative Commons Attribution 4.0 International. Cesium for Everything.",
+    "modifications": "None. The upstream GLB bytes are preserved."
+  },
+  "observed": {
+    "glb_version": 2,
+    "json_chunk_bytes": 3940,
+    "bin_chunk_bytes": 11136,
+    "mesh_count": 1,
+    "skin_count": 1,
+    "skin_name": "Armature",
+    "joint_count": 2,
+    "joint_node_indices": [3, 4],
+    "animation_count": 1,
+    "animation_index": 0,
+    "animation_name": null,
+    "animation_channels": 3,
+    "animation_samplers": 3,
+    "animation_input_accessor": 5,
+    "animation_input_samples": 50,
+    "animation_start_seconds": 0.04166661947965622,
+    "animation_end_seconds": 2.0833330154418945,
+    "animation_sample_span_seconds": 2.0416663959622383,
+    "extensions_used": [],
+    "extensions_required": []
+  }
+}

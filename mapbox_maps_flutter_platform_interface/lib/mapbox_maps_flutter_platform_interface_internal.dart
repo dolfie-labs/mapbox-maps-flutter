@@ -25,6 +25,7 @@ export 'src/interfaces/map_recorder_interface.dart';
 export 'src/interfaces/mapbox_map_interface.dart';
 export 'src/interfaces/mapbox_maps_options_interface.dart';
 export 'src/interfaces/mapbox_options_interface.dart';
+export 'src/interfaces/native_custom_layer_probe_interface.dart';
 export 'src/interfaces/offline_interface.dart';
 export 'src/interfaces/point_annotation_manager_interface.dart';
 export 'src/interfaces/polygon_annotation_manager_interface.dart';

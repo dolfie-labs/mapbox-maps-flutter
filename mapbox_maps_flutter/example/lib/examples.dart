@@ -25,6 +25,7 @@ import 'platform.dart' show isMobile, isWeb;
 import 'platform/debug_options_example.dart';
 import 'platform/map_interface_example.dart';
 import 'platform/map_recorder_example.dart';
+import 'platform/native_custom_layer_probe_example.dart';
 import 'styles/indoor_example.dart';
 import 'styles/model_comparison_example.dart';
 import 'styles/sources_example.dart';
@@ -276,6 +277,15 @@ final List<Example> examples = [
     ),
   // These APIs have no web implementation.
   if (isMobile) ...[
+    Example(
+      slug: 'native_custom_layer_probe',
+      category: ExampleCategory.platform,
+      leading: const Icon(Icons.view_in_ar),
+      title: 'Native custom-layer cube probe',
+      subtitle:
+          'P0 feasibility harness; no glTF or skeletal animation support.',
+      builder: (_) => const NativeCustomLayerProbeExample(),
+    ),
     Example(
       slug: 'offline',
       category: ExampleCategory.docs,
