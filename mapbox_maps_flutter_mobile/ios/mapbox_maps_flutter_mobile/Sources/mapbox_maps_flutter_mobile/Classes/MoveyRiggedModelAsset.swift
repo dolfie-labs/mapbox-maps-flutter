@@ -100,6 +100,41 @@ struct MoveyRiggedAnimationClock {
     mutating func suspend() { previous = nil }
 }
 
+/// Visibility has its own monotonic clock, so a paused model can still fade.
+/// Repeated placement updates and repeated targets preserve the current fade.
+struct MoveyRiggedOpacityTween {
+    private var from: Double
+    private(set) var target: Double
+    private var started: Double
+    private var duration = 0.0
+    private var suspendedAt: Double?
+
+    init(_ opacity: Double, now: Double) {
+        from = opacity; target = opacity; started = now
+    }
+    private func effectiveTime(_ now: Double) -> Double { suspendedAt ?? now }
+    func isAnimating(now: Double) -> Bool {
+        from != target && duration > 0 && effectiveTime(now) < started + duration
+    }
+    func sample(now: Double) -> Double {
+        guard duration > 0 else { return target }
+        let amount = min(1, max(0, (effectiveTime(now) - started) / duration))
+        if amount == 1 { return target }
+        return from + (target - from) * amount
+    }
+    mutating func retarget(_ opacity: Double, duration: Double, now: Double) {
+        guard opacity != target else { return }
+        from = sample(now: now); target = opacity
+        started = effectiveTime(now); self.duration = duration
+    }
+    mutating func setSuspended(_ value: Bool, now: Double) {
+        if value, suspendedAt == nil { suspendedAt = now }
+        else if !value, let suspended = suspendedAt {
+            started += max(0, now - suspended); suspendedAt = nil
+        }
+    }
+}
+
 struct MoveyRiggedPlacement {
     let latitude: Double
     let longitude: Double

@@ -15,8 +15,59 @@ void main() {
       expect(update.headingDegrees, -720);
       expect(update.clipIndex, isNull);
       expect(update.playbackRate, isNull);
+      expect(update.opacity, isNull);
+      expect(update.opacityTransitionMilliseconds, isNull);
     },
   );
+
+  test('hidden preload and native fade accept bounded opacity values', () {
+    for (final opacity in [0.0, 0.5, 1.0]) {
+      final update = NativeRiggedModelProbeUpdate(
+        latitude: 0,
+        longitude: 0,
+        headingDegrees: 0,
+        opacity: opacity,
+        opacityTransitionMilliseconds: 220,
+      );
+      expect(update.opacity, opacity);
+      expect(update.opacityTransitionMilliseconds, 220);
+    }
+  });
+
+  test('rejects invalid native fades before transport', () {
+    for (final opacity in [-0.1, 1.1, double.nan, double.infinity]) {
+      expect(
+        () => NativeRiggedModelProbeUpdate(
+          latitude: 0,
+          longitude: 0,
+          headingDegrees: 0,
+          opacity: opacity,
+        ),
+        throwsArgumentError,
+      );
+    }
+    for (final duration in [-1, 1001]) {
+      expect(
+        () => NativeRiggedModelProbeUpdate(
+          latitude: 0,
+          longitude: 0,
+          headingDegrees: 0,
+          opacity: 1,
+          opacityTransitionMilliseconds: duration,
+        ),
+        throwsArgumentError,
+      );
+    }
+    expect(
+      () => NativeRiggedModelProbeUpdate(
+        latitude: 0,
+        longitude: 0,
+        headingDegrees: 0,
+        opacityTransitionMilliseconds: 220,
+      ),
+      throwsArgumentError,
+    );
+  });
 
   test('rejects invalid placement before native transport', () {
     for (final latitude in [double.nan, double.infinity, 85.1, -85.1]) {

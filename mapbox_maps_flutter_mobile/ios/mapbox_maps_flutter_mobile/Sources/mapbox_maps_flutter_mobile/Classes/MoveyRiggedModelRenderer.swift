@@ -12,6 +12,7 @@ struct MoveyRiggedConfiguration {
     let headingDegrees: Double
     let clipIndex: Int
     let playbackRate: Double
+    let opacity: Double
 }
 
 /// The CPU asset crosses threads as an immutable snapshot. Metal resource
@@ -26,6 +27,9 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         let jointCount: Int
         let clipCount: Int
         let clipIndex: Int
+        let opacity: Double
+        let targetOpacity: Double
+        let isOpacityAnimating: Bool
         let lastErrorCode: String?
     }
     private let lock = NSLock()
@@ -39,11 +43,13 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
     private var measuredPalette: [simd_float4x4]?
     private var clock = MoveyRiggedAnimationClock()
     private var placement: MoveyRiggedPlacementTween?
+    private var opacity = MoveyRiggedOpacityTween(1, now: 0)
     private var foreground = true
     private var lastErrorCode: String?
     private var device: MTLDevice?
     private var pipeline: MTLRenderPipelineState?
     private var depthState: MTLDepthStencilState?
+    private var transparentDepthState: MTLDepthStencilState?
     private var vertexBuffer: MTLBuffer?
     private var indexBuffer: MTLBuffer?
     private var baseColorTexture: MTLTexture?
@@ -60,6 +66,8 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         poseRevision = 0
         measuredPalette = nil
         clock.reset()
+        opacity = MoveyRiggedOpacityTween(configuration.opacity, now: CACurrentMediaTime())
+        opacity.setSuspended(!foreground, now: CACurrentMediaTime())
         var tween = MoveyRiggedPlacementTween(.init(latitude: configuration.latitude, longitude: configuration.longitude,
                                                    headingDegrees: configuration.headingDegrees), now: CACurrentMediaTime())
         tween.setSuspended(!foreground, now: CACurrentMediaTime())
@@ -77,6 +85,7 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         paused = true
         clock.suspend()
         placement = nil
+        opacity = MoveyRiggedOpacityTween(0, now: CACurrentMediaTime())
         lock.unlock()
     }
 
@@ -93,32 +102,48 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
     func setForeground(_ value: Bool) {
         lock.lock()
         placement?.setSuspended(!value, now: CACurrentMediaTime())
+        opacity.setSuspended(!value, now: CACurrentMediaTime())
         foreground = value
         lock.unlock()
     }
 
-    var isMoving: Bool {
+    var needsRepaint: Bool {
         lock.lock(); defer { lock.unlock() }
-        return placement?.isMoving(now: CACurrentMediaTime()) == true
+        let now = CACurrentMediaTime()
+        return opacity.isAnimating(now: now) || (opacity.sample(now: now) > 0 &&
+            ((!paused && (configuration?.playbackRate ?? 0) > 0) || placement?.isMoving(now: now) == true))
     }
 
     /// Updates only cached placement/clock state. Asset generations and GPU
     /// resources remain unchanged for GPS, heading, clip and rate updates.
     func update(latitude: Double, longitude: Double, headingDegrees: Double,
-                clipIndex: Int?, playbackRate: Double?) -> String? {
+                clipIndex: Int?, playbackRate: Double?, opacity newOpacity: Double?,
+                opacityTransitionMilliseconds: Int?) -> String? {
         lock.lock(); defer { lock.unlock() }
         guard let asset, let current = configuration else { return "MODEL_NOT_ATTACHED" }
         let clip = clipIndex ?? current.clipIndex
         guard asset.clips.indices.contains(clip) else { return "INVALID_ARGUMENTS" }
         let now = CACurrentMediaTime()
+        let wasHidden = opacity.sample(now: now) == 0 && !opacity.isAnimating(now: now)
         advanceClock(now: now)
         if clip != current.clipIndex { clock.reset() }
         configuration = MoveyRiggedConfiguration(latitude: latitude, longitude: longitude,
             altitudeMeters: current.altitudeMeters, heightMeters: current.heightMeters, headingDegrees: headingDegrees,
-            clipIndex: clip, playbackRate: playbackRate ?? current.playbackRate)
+            clipIndex: clip, playbackRate: playbackRate ?? current.playbackRate,
+            opacity: newOpacity ?? current.opacity)
         // Establish the same clock boundary for a new rate without a time jump.
         advanceClock(now: now)
-        placement?.retarget(.init(latitude: latitude, longitude: longitude, headingDegrees: headingDegrees), now: now)
+        let next = MoveyRiggedPlacement(latitude: latitude, longitude: longitude, headingDegrees: headingDegrees)
+        if wasHidden {
+            var snapped = MoveyRiggedPlacementTween(next, now: now)
+            snapped.setSuspended(!foreground, now: now)
+            placement = snapped
+        } else {
+            placement?.retarget(next, now: now)
+        }
+        if let newOpacity {
+            opacity.retarget(newOpacity, duration: Double(opacityTransitionMilliseconds ?? 0) / 1000, now: now)
+        }
         return nil
     }
 
@@ -139,7 +164,9 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         return Diagnostics(ready: ready, renderedFrames: renderedFrames, poseRevision: poseRevision,
                            animationTimeSeconds: clock.time, vertexCount: asset?.vertices.count ?? 0,
                            jointCount: asset?.joints.count ?? 0, clipCount: asset?.clips.count ?? 0,
-                           clipIndex: configuration?.clipIndex ?? 0, lastErrorCode: lastErrorCode)
+                           clipIndex: configuration?.clipIndex ?? 0, opacity: opacity.sample(now: CACurrentMediaTime()),
+                           targetOpacity: opacity.target, isOpacityAnimating: opacity.isAnimating(now: CACurrentMediaTime()),
+                           lastErrorCode: lastErrorCode)
     }
 
     func renderingWillStart(_ metalDevice: MTLDevice, colorPixelFormat: UInt, depthStencilPixelFormat: UInt) {
@@ -155,6 +182,11 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
             descriptor.vertexFunction = vertex
             descriptor.fragmentFunction = fragment
             descriptor.colorAttachments[0].pixelFormat = color
+            descriptor.colorAttachments[0].isBlendingEnabled = true
+            descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+            descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             descriptor.depthAttachmentPixelFormat = depth
             if depth == .depth32Float_stencil8 { descriptor.stencilAttachmentPixelFormat = depth }
             let newPipeline = try metalDevice.makeRenderPipelineState(descriptor: descriptor)
@@ -162,9 +194,12 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
             depthDescriptor.isDepthWriteEnabled = true
             depthDescriptor.depthCompareFunction = .lessEqual
             guard let newDepthState = metalDevice.makeDepthStencilState(descriptor: depthDescriptor) else { recordError("METAL_DEPTH_STATE_UNAVAILABLE"); return }
+            depthDescriptor.isDepthWriteEnabled = false
+            guard let newTransparentDepthState = metalDevice.makeDepthStencilState(descriptor: depthDescriptor) else { recordError("METAL_DEPTH_STATE_UNAVAILABLE"); return }
             device = metalDevice
             pipeline = newPipeline
             depthState = newDepthState
+            transparentDepthState = newTransparentDepthState
         } catch { recordError("METAL_PIPELINE_UNAVAILABLE") }
     }
 
@@ -176,6 +211,7 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         let now = CACurrentMediaTime()
         advanceClock(now: now)
         let time = clock.time
+        let snapshotOpacity = opacity.sample(now: now)
         let position = placement?.sample(now: now) ?? .init(latitude: configuration.latitude, longitude: configuration.longitude,
                                                           headingDegrees: configuration.headingDegrees)
         lock.unlock()
@@ -202,6 +238,8 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
             if generation == snapshotGeneration { ready = true }
             lock.unlock()
         }
+        // A hidden prewarm uploads real GPU resources but never touches depth.
+        guard snapshotOpacity > 0 else { return }
         guard let vertices = vertexBuffer, let indices = indexBuffer, let materialTexture = baseColorTexture, let sampler = textureSampler,
               let pose = asset.pose(time: time, clipIndex: configuration.clipIndex),
               var matrix = MoveyGeographicMatrix.make(parameters, latitude: position.latitude, longitude: position.longitude,
@@ -222,7 +260,7 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         encoder.label = "Movey P0 skinned GLB in Mapbox pass"
         encoder.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(texture.width), height: Double(texture.height), znear: 0, zfar: 1))
         encoder.setRenderPipelineState(pipeline)
-        encoder.setDepthStencilState(depthState)
+        encoder.setDepthStencilState(snapshotOpacity == 1 ? depthState : transparentDepthState)
         encoder.setCullMode(.none)
         encoder.setVertexBuffer(vertices, offset: 0, index: 0)
         encoder.setVertexBytes(&matrix, length: MemoryLayout<simd_float4x4>.stride, index: 1)
@@ -231,6 +269,8 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         }
         var color = asset.baseColor
         encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        var visibleOpacity = Float(snapshotOpacity)
+        encoder.setFragmentBytes(&visibleOpacity, length: MemoryLayout<Float>.stride, index: 1)
         encoder.setFragmentTexture(materialTexture, index: 0)
         encoder.setFragmentSamplerState(sampler, index: 0)
         encoder.drawIndexedPrimitives(type: .triangle, indexCount: asset.indices.count, indexType: .uint32, indexBuffer: indices, indexBufferOffset: 0)
@@ -247,6 +287,7 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         device = nil
         pipeline = nil
         depthState = nil
+        transparentDepthState = nil
         vertexBuffer = nil
         indexBuffer = nil
         baseColorTexture = nil
@@ -302,8 +343,9 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         SkinOutput output; output.position = mvp * world; output.uv = v.uv; return output;
     }
     fragment float4 moveySkinFragment(SkinOutput input [[stage_in]], constant float4 &baseColor [[buffer(0)]],
+        constant float &opacity [[buffer(1)]],
         texture2d<float> baseTexture [[texture(0)]], sampler baseSampler [[sampler(0)]]) {
-        return float4(baseTexture.sample(baseSampler, input.uv).rgb * baseColor.rgb, 1.0);
+        return float4(baseTexture.sample(baseSampler, input.uv).rgb * baseColor.rgb, opacity);
     }
     """
 }

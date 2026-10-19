@@ -17,6 +17,7 @@ final class NativeRiggedModelProbeOptions {
     this.clipIndex = 0,
     this.playbackRate = 1,
     this.paused = false,
+    this.opacity = 1,
   }) : glbBytes = _copyGlb(glbBytes) {
     if (!latitude.isFinite ||
         latitude.abs() > NativeCubeProbeOptions.mercatorLatitudeLimit) {
@@ -48,6 +49,7 @@ final class NativeRiggedModelProbeOptions {
     if (playbackRate < 0 || playbackRate > 4) {
       throw ArgumentError.value(playbackRate, 'playbackRate', 'Outside [0, 4]');
     }
+    _validateOpacity(opacity);
   }
 
   static const maxGlbBytes = 2 * 1024 * 1024;
@@ -77,6 +79,9 @@ final class NativeRiggedModelProbeOptions {
   final int clipIndex;
   final double playbackRate;
   final bool paused;
+
+  /// Zero prepares GPU resources without drawing or writing depth.
+  final double opacity;
 }
 
 /// Updates one accepted model without decoding its GLB or replacing GPU meshes.
@@ -90,6 +95,8 @@ final class NativeRiggedModelProbeUpdate {
     required this.headingDegrees,
     this.clipIndex,
     this.playbackRate,
+    this.opacity,
+    this.opacityTransitionMilliseconds,
   }) {
     if (!latitude.isFinite ||
         latitude.abs() > NativeCubeProbeOptions.mercatorLatitudeLimit) {
@@ -113,6 +120,17 @@ final class NativeRiggedModelProbeUpdate {
     if (rate != null && (!rate.isFinite || rate < 0 || rate > 4)) {
       throw ArgumentError.value(rate, 'playbackRate', 'Outside [0, 4]');
     }
+    final alpha = opacity;
+    if (alpha != null) _validateOpacity(alpha);
+    final duration = opacityTransitionMilliseconds;
+    if (duration != null &&
+        (alpha == null || duration < 0 || duration > 1000)) {
+      throw ArgumentError.value(
+        duration,
+        'opacityTransitionMilliseconds',
+        'Requires opacity and a duration in [0, 1000]',
+      );
+    }
   }
 
   final double latitude;
@@ -120,6 +138,16 @@ final class NativeRiggedModelProbeUpdate {
   final double headingDegrees;
   final int? clipIndex;
   final double? playbackRate;
+  final double? opacity;
+
+  /// A native-clock transition. Omission means an immediate opacity change.
+  final int? opacityTransitionMilliseconds;
+}
+
+void _validateOpacity(double opacity) {
+  if (!opacity.isFinite || opacity < 0 || opacity > 1) {
+    throw ArgumentError.value(opacity, 'opacity', 'Outside [0, 1]');
+  }
 }
 
 /// Native observations for one rigged model, separate from the cube probe.
@@ -140,6 +168,9 @@ final class NativeRiggedModelProbeDiagnostics {
     required this.clipIndex,
     required this.lastErrorCode,
     this.incomingGlErrorCode,
+    this.opacity,
+    this.targetOpacity,
+    this.isOpacityAnimating,
   });
 
   int get protocolVersion => 1;
@@ -160,4 +191,9 @@ final class NativeRiggedModelProbeDiagnostics {
   final int clipIndex;
   final String? lastErrorCode;
   final String? incomingGlErrorCode;
+
+  /// Optional for hosts predating hidden GPU preparation and opacity fades.
+  final double? opacity;
+  final double? targetOpacity;
+  final bool? isOpacityAnimating;
 }

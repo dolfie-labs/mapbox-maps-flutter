@@ -76,6 +76,49 @@ Attach success means CPU validation accepted the asset. Poll diagnostics for
 does not prove visible output. `incomingGlErrorCode` records inherited Android
 GL warnings separately. Pause on hidden routes as well as app backgrounding.
 
+## Hidden prewarm and native opacity
+
+Set `opacity: 0, paused: true` in `NativeRiggedModelProbeOptions` to prepare
+vertex/index buffers, shaders and textures without drawing or writing depth.
+`ready == true` with `renderedFrames == 0` is valid for this state. Keep this
+single warmed model while the avatar represents the player at far zoom.
+
+Reveal the accepted model with a native-clock fade, then resume animation:
+
+```dart
+await probe.updateRiggedModel(NativeRiggedModelProbeUpdate(
+  latitude: nextLatitude,
+  longitude: nextLongitude,
+  headingDegrees: course,
+  opacity: 1,
+  opacityTransitionMilliseconds: 220,
+));
+await probe.setPaused(false);
+```
+
+Opacity defaults to 1; omitted update fields preserve current visibility.
+Opacity is finite in [0, 1]; transition duration is an integer in [0, 1000]
+milliseconds and requires opacity. Omitted duration changes opacity immediately.
+Defaults preserve original probe rendering. The native opacity clock runs
+independently of paused bones, submits the endpoint, then stops repainting.
+Repeated targets/GPS updates do not restart a fade. Reversals start from the
+current interpolated opacity. Hidden placement snaps to the cached target
+without running a placement ticker; reveal uses that latest position.
+
+Diagnostics optionally include `opacity`, `targetOpacity` and
+`isOpacityAnimating`; older hosts omit them. Partial opacity uses straight-alpha
+blending with depth writes disabled; zero opacity skips drawing entirely.
+Hiding retains resources and animation time. Explicit detach, map disposal,
+and application-owned background/style/owner cleanup still release the model.
+Applications can pair this with a native symbol icon-opacity transition and
+start camera flight only after prewarm readiness. A full native rebuild is
+required when adding this support to an installed Flutter app.
+
+`integration_test/home_character_preload_test.dart` exercises hidden readiness,
+paused fades, repeated targets, cached GPS, alpha output and repeated reveal.
+External native captures use the `PRELOAD_*_CAPTURE` log markers. Its latency
+observations are emulator/simulator test measurements, not device FPS claims.
+
 ## Reproduce and evidence
 
 The catalog entry is `native_rigged_model_probe`. From
@@ -102,7 +145,7 @@ diagnostic. Both must preserve the caller's layer.
 The 15,104-byte RiggedSimple fixture has 160 vertices, two joints and one unnamed
 clip at index 0. It is unchanged, © 2017 Cesium, CC BY 4.0; preserve its
 [attribution and manifest](../tool/animated_entities/README.md). It is not a
-Walk/Idle clip. Verification also passed 310 Flutter tests, 22 Python validator
+Walk/Idle clip. Verification also passed 315 Flutter tests, 22 Python validator
 tests and Swift CPU decoder checks. Physical-device performance,
 multiple independent actors and outfit changes remain unverified or unimplemented.
 

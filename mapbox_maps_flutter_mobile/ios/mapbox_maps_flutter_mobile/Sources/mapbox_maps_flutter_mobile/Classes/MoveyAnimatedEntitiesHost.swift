@@ -128,11 +128,27 @@ final class MoveyAnimatedEntitiesHost: NSObject {
                 }
                 playbackRate = rate
             }
+            var opacity: Double?
+            if arguments["opacity"] != nil {
+                guard let value = number(arguments, "opacity"), value >= 0, value <= 1 else {
+                    result(error("INVALID_ARGUMENTS", "opacity must be in [0, 1].")); return
+                }
+                opacity = value
+            }
+            var opacityTransitionMilliseconds: Int?
+            if arguments["opacityTransitionMilliseconds"] != nil {
+                guard opacity != nil, let duration = number(arguments, "opacityTransitionMilliseconds"),
+                      duration.rounded(.towardZero) == duration, duration >= 0, duration <= 1000 else {
+                    result(error("INVALID_ARGUMENTS", "An opacity transition requires opacity and an integer duration in [0, 1000].")); return
+                }
+                opacityTransitionMilliseconds = Int(duration)
+            }
             guard attached, activeRigged else {
                 result(error("MODEL_NOT_ATTACHED", "A CPU-accepted rigged model is required before an update.")); return
             }
             if let code = riggedRenderer.update(latitude: latitude, longitude: longitude, headingDegrees: heading,
-                                                 clipIndex: clipIndex, playbackRate: playbackRate) {
+                                                 clipIndex: clipIndex, playbackRate: playbackRate, opacity: opacity,
+                                                 opacityTransitionMilliseconds: opacityTransitionMilliseconds) {
                 result(error(code, "The model update could not be accepted.")); return
             }
             if let playbackRate { modelPlaybackRate = playbackRate }
@@ -168,6 +184,7 @@ final class MoveyAnimatedEntitiesHost: NSObject {
                     "poseRevision": state.poseRevision, "animationTimeSeconds": state.animationTimeSeconds,
                     "vertexCount": state.vertexCount, "jointCount": state.jointCount, "clipCount": state.clipCount,
                     "clipIndex": state.clipIndex, "lastErrorCode": failure.map { $0 as Any } ?? NSNull(),
+                    "opacity": state.opacity, "targetOpacity": state.targetOpacity, "isOpacityAnimating": state.isOpacityAnimating,
                     "incomingGlErrorCode": NSNull()])
         default: result(FlutterMethodNotImplemented)
         }
@@ -185,6 +202,13 @@ final class MoveyAnimatedEntitiesHost: NSObject {
             result(error("INVALID_ARGUMENTS", "A rigged model requires GLB bytes, finite Mercator placement, a positive height, clip index and playback rate in [0, 4].")); return
         }
         guard bytes.data.count <= MoveyGLBDecoder.maximumBytes else { result(error("GLB_TOO_LARGE", "A probe GLB must be at most 2 MiB.")); return }
+        var opacity = 1.0
+        if arguments["opacity"] != nil {
+            guard let value = number(arguments, "opacity"), value >= 0, value <= 1 else {
+                result(error("INVALID_ARGUMENTS", "opacity must be in [0, 1].")); return
+            }
+            opacity = value
+        }
         cancelLoad(code: "LOAD_SUPERSEDED")
         let generation = loadGeneration
         let token = MoveyGLBCancellation()
@@ -194,7 +218,8 @@ final class MoveyAnimatedEntitiesHost: NSObject {
         modelLoadError = nil
         let data = bytes.data
         let configuration = MoveyRiggedConfiguration(latitude: latitude, longitude: longitude, altitudeMeters: altitude,
-                                                     heightMeters: height, headingDegrees: heading, clipIndex: Int(clip), playbackRate: rate)
+                                                     heightMeters: height, headingDegrees: heading, clipIndex: Int(clip), playbackRate: rate,
+                                                     opacity: opacity)
         decodeQueue.async { [weak self] in
             let decoded: Result<MoveyRiggedAsset, Error> = Result {
                 let asset = try MoveyGLBDecoder.decode(data, cancellation: token)
@@ -300,7 +325,7 @@ final class MoveyAnimatedEntitiesHost: NSObject {
         guard !disposed, attached, foreground, ownsLayer,
               let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId), activeError == nil else { stopRepaint(); return }
         map.triggerRepaint()
-        let advances = activeRigged ? ((!requestedPaused && modelPlaybackRate > 0) || riggedRenderer.isMoving)
+        let advances = activeRigged ? riggedRenderer.needsRepaint
                                     : (!requestedPaused && rotationDegreesPerSecond != 0)
         guard advances else { stopRepaint(); return }
         guard displayLink == nil else { return }
@@ -316,7 +341,7 @@ final class MoveyAnimatedEntitiesHost: NSObject {
               let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId), activeError == nil else { stopRepaint(); return }
         // Trigger the endpoint frame before stopping a paused placement tween.
         map.triggerRepaint()
-        let advances = activeRigged ? ((!requestedPaused && modelPlaybackRate > 0) || riggedRenderer.isMoving)
+        let advances = activeRigged ? riggedRenderer.needsRepaint
                                     : (!requestedPaused && rotationDegreesPerSecond != 0)
         if !advances { stopRepaint() }
     }

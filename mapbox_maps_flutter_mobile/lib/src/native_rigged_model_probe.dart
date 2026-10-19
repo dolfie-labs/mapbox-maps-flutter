@@ -19,6 +19,7 @@ class _NativeRiggedModelProbeChannel
       'clipIndex': options.clipIndex,
       'playbackRate': options.playbackRate,
       'paused': options.paused,
+      'opacity': options.opacity,
     });
   }
 
@@ -26,12 +27,16 @@ class _NativeRiggedModelProbeChannel
   Future<void> updateRiggedModel(NativeRiggedModelProbeUpdate update) async {
     final clipIndex = update.clipIndex;
     final playbackRate = update.playbackRate;
+    final opacity = update.opacity;
+    final opacityTransitionMilliseconds = update.opacityTransitionMilliseconds;
     await _channel._invoke('updateRiggedModel', {
       'latitude': update.latitude,
       'longitude': update.longitude,
       'headingDegrees': update.headingDegrees,
       'clipIndex': ?clipIndex,
       'playbackRate': ?playbackRate,
+      'opacity': ?opacity,
+      'opacityTransitionMilliseconds': ?opacityTransitionMilliseconds,
     });
   }
 
@@ -86,6 +91,19 @@ class _NativeRiggedModelProbeChannel
         'Invalid incoming rigged model GL error code',
       );
     }
+    double? opacityValue(String key) {
+      final value = result[key];
+      if (value == null) return null;
+      if (value is! num || !value.isFinite || value < 0 || value > 1) {
+        throw FormatException('Invalid native opacity diagnostic: $key');
+      }
+      return value.toDouble();
+    }
+
+    final animating = result['isOpacityAnimating'];
+    if (animating != null && animating is! bool) {
+      throw const FormatException('Invalid native opacity animation state');
+    }
     return NativeRiggedModelProbeDiagnostics(
       backend: backend,
       requested: requiredValue<bool>('requested'),
@@ -101,6 +119,9 @@ class _NativeRiggedModelProbeChannel
       clipIndex: count('clipIndex'),
       lastErrorCode: result['lastErrorCode'] as String?,
       incomingGlErrorCode: incoming as String?,
+      opacity: opacityValue('opacity'),
+      targetOpacity: opacityValue('targetOpacity'),
+      isOpacityAnimating: animating as bool?,
     );
   }
 }

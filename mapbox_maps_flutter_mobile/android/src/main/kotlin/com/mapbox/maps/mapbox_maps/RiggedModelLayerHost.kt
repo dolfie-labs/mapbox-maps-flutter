@@ -23,11 +23,13 @@ internal class RiggedModelState(
   headingDegrees: Double,
   clipIndex: Int,
   playbackRate: Double,
+  initialOpacity: Double = 1.0,
 ) {
   val renderedFrames = AtomicLong()
   val poseRevision = AtomicLong()
   val evaluator = RiggedPoseEvaluator(model)
   private val playback = AtomicReference(RiggedPlayback(clipIndex, playbackRate, 0.0))
+  private val opacity = RiggedOpacity(initialOpacity)
   private val initialPlacement = RiggedPlacement(latitude, longitude, normalizeHeading(headingDegrees))
   private val placement = AtomicReference(RiggedPlacementTransition(initialPlacement, initialPlacement, 0L))
   private val settledPlacement = AtomicReference(placement.get())
@@ -46,18 +48,34 @@ internal class RiggedModelState(
   }
 
   /** Main-thread command, with atomic publication to Mapbox's render thread. */
-  fun update(latitude: Double, longitude: Double, heading: Double, clip: Int?, rate: Double?): Boolean {
+  fun update(latitude: Double, longitude: Double, heading: Double, clip: Int?, rate: Double?, nextOpacity: Double? = null, opacityTransitionMilliseconds: Long = 0L): Boolean {
+    val now = System.nanoTime()
+    val wasHidden = opacity.snapshot(now).hidden
     val previous = playback.get()
     val nextClip = clip ?: previous.clipIndex
     val changedClip = nextClip != previous.clipIndex
     playback.set(RiggedPlayback(nextClip, rate ?: previous.rate, if (changedClip) 0.0 else previous.seconds))
     val target = RiggedPlacement(latitude, longitude, normalizeHeading(heading))
     val previousPlacement = placement.get()
-    if (target != previousPlacement.to) {
-      val now = System.nanoTime()
+    if (wasHidden) {
+      val snapped = RiggedPlacementTransition(target, target, 0L)
+      placement.set(snapped)
+      settledPlacement.set(snapped)
+    } else if (target != previousPlacement.to) {
       placement.set(RiggedPlacementTransition(previousPlacement.sample(now), target, now))
     }
+    if (nextOpacity != null) opacity.update(nextOpacity, opacityTransitionMilliseconds, now)
     return changedClip
+  }
+
+  fun opacitySnapshot(now: Long = System.nanoTime()): RiggedOpacitySnapshot = opacity.snapshot(now)
+  fun sampleOpacity(now: Long): Double = opacity.sample(now)
+  fun needsOpacityFrame(): Boolean = opacity.needsFrame()
+
+  fun settleHiddenPlacement() {
+    val current = placement.get()
+    val snapped = RiggedPlacementTransition(current.to, current.to, 0L)
+    if (placement.compareAndSet(current, snapped)) settledPlacement.set(snapped)
   }
 
   fun needsPlacementFrame(): Boolean = settledPlacement.get() !== placement.get()
@@ -95,7 +113,7 @@ private data class RiggedPlacementTransition(val from: RiggedPlacement, val to: 
 internal class RiggedModelLayerHost(
   private val active: AtomicReference<RiggedModelState?>,
   private val state: RiggedModelState,
-) : ProbeGlesHost("MoveyRiggedProbe", capturesTextureState = true) {
+) : ProbeGlesHost("MoveyRiggedProbe", capturesTextureState = true, capturesBlendState = true) {
   private var program = 0
   private val buffers = IntArray(2)
   private val vertexArray = IntArray(1)
@@ -104,6 +122,7 @@ internal class RiggedModelLayerHost(
   private var jointsLocation = -1
   private var colorLocation = -1
   private var textureLocation = -1
+  private var opacityLocation = -1
   private val modelMatrix = DoubleArray(16)
   private val finalMatrix = FloatArray(16)
 
@@ -120,7 +139,8 @@ internal class RiggedModelLayerHost(
       jointsLocation = GLES20.glGetUniformLocation(program, "u_joints[0]")
       colorLocation = GLES20.glGetUniformLocation(program, "u_color")
       textureLocation = GLES20.glGetUniformLocation(program, "u_texture")
-      checkGpu(matrixLocation >= 0 && jointsLocation >= 0 && colorLocation >= 0 && textureLocation >= 0, "GLES_SHADER_INTERFACE_INVALID")
+      opacityLocation = GLES20.glGetUniformLocation(program, "u_opacity")
+      checkGpu(matrixLocation >= 0 && jointsLocation >= 0 && colorLocation >= 0 && textureLocation >= 0 && opacityLocation >= 0, "GLES_SHADER_INTERFACE_INVALID")
       GLES20.glGenBuffers(2, buffers, 0)
       GLES30.glGenVertexArrays(1, vertexArray, 0)
       checkGpu(buffers.all { it != 0 } && vertexArray[0] != 0, "GLES_BUFFER_CREATION_FAILED")
@@ -167,6 +187,12 @@ internal class RiggedModelLayerHost(
 
   override fun render(parameters: CustomLayerRenderParameters) {
     if (active.get() !== state || !initialized.get() || lastErrorCode.get() != null) return
+    val opacity = state.sampleOpacity(System.nanoTime())
+    // Hidden preloads still initialize/upload above, but never draw or write depth.
+    if (opacity == 0.0) {
+      state.settleHiddenPlacement()
+      return
+    }
     observeIncomingGlError("render")
     try {
       val playback = state.playbackSnapshot()
@@ -186,17 +212,24 @@ internal class RiggedModelLayerHost(
     try {
       GLES20.glEnable(GLES20.GL_DEPTH_TEST)
       GLES20.glDepthFunc(GLES20.GL_LESS)
-      GLES20.glDepthMask(true)
+      GLES20.glDepthMask(opacity == 1.0)
       GLES20.glDepthRangef(parameters.depthRange.min, parameters.depthRange.max)
       GLES20.glDisable(GLES20.GL_STENCIL_TEST)
       GLES20.glDisable(GLES20.GL_CULL_FACE)
-      GLES20.glDisable(GLES20.GL_BLEND)
+      if (opacity < 1.0) {
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendEquationSeparate(GLES20.GL_FUNC_ADD, GLES20.GL_FUNC_ADD)
+        GLES20.glBlendFuncSeparate(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA, GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+      } else {
+        GLES20.glDisable(GLES20.GL_BLEND)
+      }
       GLES20.glColorMask(true, true, true, true)
       GLES20.glUseProgram(program)
       GLES30.glBindVertexArray(vertexArray[0])
       GLES20.glUniformMatrix4fv(matrixLocation, 1, false, finalMatrix, 0)
       GLES20.glUniformMatrix4fv(jointsLocation, state.model.jointNodes.size, false, state.evaluator.palette, 0)
       GLES20.glUniform4fv(colorLocation, 1, state.model.color, 0)
+      GLES20.glUniform1f(opacityLocation, opacity.toFloat())
       GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
       GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0])
       GLES30.glBindSampler(0, 0)
@@ -317,8 +350,9 @@ internal class RiggedModelLayerHost(
       precision mediump float;
       uniform vec4 u_color;
       uniform sampler2D u_texture;
+      uniform float u_opacity;
       varying highp vec2 v_texcoord;
-      void main() { gl_FragColor = vec4(u_color.rgb * texture2D(u_texture, v_texcoord).rgb, 1.0); }
+      void main() { gl_FragColor = vec4(u_color.rgb * texture2D(u_texture, v_texcoord).rgb, u_opacity); }
     """.trimIndent()
   }
 }

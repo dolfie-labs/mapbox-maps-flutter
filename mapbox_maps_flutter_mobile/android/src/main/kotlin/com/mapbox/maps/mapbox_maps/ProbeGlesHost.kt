@@ -8,11 +8,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /** Shared context/resource checks for both experimental native probes. */
-internal abstract class ProbeGlesHost(private val logTag: String = "MoveyCubeProbe", capturesTextureState: Boolean = false) : CustomLayerHost {
+internal abstract class ProbeGlesHost(private val logTag: String = "MoveyCubeProbe", capturesTextureState: Boolean = false, capturesBlendState: Boolean = false) : CustomLayerHost {
   val initialized = AtomicBoolean(false)
   val lastErrorCode = AtomicReference<String?>(null)
   val incomingGlErrorCode = AtomicReference<String?>(null)
-  private val previousGlState = GlState(capturesTextureState)
+  private val previousGlState = GlState(capturesTextureState, capturesBlendState)
 
   protected fun createProgram(vertexSource: String, fragmentSource: String, attributes: List<String>): Int {
     var vertexShader = 0
@@ -114,7 +114,7 @@ internal abstract class ProbeGlesHost(private val logTag: String = "MoveyCubePro
   protected class GpuException(val code: String) : RuntimeException()
 
   /** Only the state changed by this layer is captured; Mapbox owns framebuffer/viewport. */
-  private class GlState(private val capturesTextureState: Boolean) {
+  private class GlState(private val capturesTextureState: Boolean, private val capturesBlendState: Boolean) {
     private val program = IntArray(1)
     private val arrayBuffer = IntArray(1)
     private val vertexArray = IntArray(1)
@@ -126,6 +126,12 @@ internal abstract class ProbeGlesHost(private val logTag: String = "MoveyCubePro
     private var stencilTest = false
     private var cullFace = false
     private var blend = false
+    private val blendSourceRgb = IntArray(1)
+    private val blendDestinationRgb = IntArray(1)
+    private val blendSourceAlpha = IntArray(1)
+    private val blendDestinationAlpha = IntArray(1)
+    private val blendEquationRgb = IntArray(1)
+    private val blendEquationAlpha = IntArray(1)
     private val activeTexture = IntArray(1)
     private val texture0 = IntArray(1)
     private val sampler0 = IntArray(1)
@@ -147,6 +153,14 @@ internal abstract class ProbeGlesHost(private val logTag: String = "MoveyCubePro
       stencilTest = GLES20.glIsEnabled(GLES20.GL_STENCIL_TEST)
       cullFace = GLES20.glIsEnabled(GLES20.GL_CULL_FACE)
       blend = GLES20.glIsEnabled(GLES20.GL_BLEND)
+      if (capturesBlendState) {
+        GLES20.glGetIntegerv(GLES20.GL_BLEND_SRC_RGB, blendSourceRgb, 0)
+        GLES20.glGetIntegerv(GLES20.GL_BLEND_DST_RGB, blendDestinationRgb, 0)
+        GLES20.glGetIntegerv(GLES20.GL_BLEND_SRC_ALPHA, blendSourceAlpha, 0)
+        GLES20.glGetIntegerv(GLES20.GL_BLEND_DST_ALPHA, blendDestinationAlpha, 0)
+        GLES20.glGetIntegerv(GLES20.GL_BLEND_EQUATION_RGB, blendEquationRgb, 0)
+        GLES20.glGetIntegerv(GLES20.GL_BLEND_EQUATION_ALPHA, blendEquationAlpha, 0)
+      }
       if (capturesTextureState) {
         GLES20.glGetIntegerv(GLES20.GL_ACTIVE_TEXTURE, activeTexture, 0)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -173,6 +187,10 @@ internal abstract class ProbeGlesHost(private val logTag: String = "MoveyCubePro
       restoreFlag(GLES20.GL_STENCIL_TEST, stencilTest)
       restoreFlag(GLES20.GL_CULL_FACE, cullFace)
       restoreFlag(GLES20.GL_BLEND, blend)
+      if (capturesBlendState) {
+        GLES20.glBlendEquationSeparate(blendEquationRgb[0], blendEquationAlpha[0])
+        GLES20.glBlendFuncSeparate(blendSourceRgb[0], blendDestinationRgb[0], blendSourceAlpha[0], blendDestinationAlpha[0])
+      }
       if (capturesTextureState) {
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture0[0])

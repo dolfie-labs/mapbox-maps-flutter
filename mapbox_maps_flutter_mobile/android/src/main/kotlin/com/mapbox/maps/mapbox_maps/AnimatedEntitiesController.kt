@@ -250,6 +250,7 @@ internal class AnimatedEntitiesController(
     val height = number("heightMeters")
     val heading = number("headingDegrees")
     val rate = number("playbackRate")
+    val opacity = if (arguments.containsKey("opacity")) number("opacity").also { require(it in 0.0..1.0) } else 1.0
     val index = arguments["clipIndex"]
     require(index is Int || index is Long)
     val clipIndex = (index as Number).toLong()
@@ -267,7 +268,7 @@ internal class AnimatedEntitiesController(
       try {
         val model = RiggedGlbLoader.decode(bytes)
         if (clipIndex >= model.clips.size) throw GlbException("INVALID_ARGUMENTS")
-        decoded = RiggedModelState(model, latitude, longitude, altitude, height, heading, clipIndex.toInt(), rate)
+        decoded = RiggedModelState(model, latitude, longitude, altitude, height, heading, clipIndex.toInt(), rate, opacity)
       } catch (error: GlbException) {
         failure = error.code
       } catch (_: RuntimeException) {
@@ -341,7 +342,14 @@ internal class AnimatedEntitiesController(
       index.toInt()
     } else null
     val rate = if (arguments.containsKey("playbackRate")) number("playbackRate").also { require(it in 0.0..4.0) } else null
-    if (model.update(latitude, longitude, heading, clip, rate)) previousFrameNanos = 0L
+    val opacity = if (arguments.containsKey("opacity")) number("opacity").also { require(it in 0.0..1.0) } else null
+    val duration = if (arguments.containsKey("opacityTransitionMilliseconds")) {
+      require(opacity != null)
+      val value = arguments["opacityTransitionMilliseconds"]
+      require(value is Int || value is Long)
+      (value as Number).toLong().also { require(it in 0L..1000L) }
+    } else 0L
+    if (model.update(latitude, longitude, heading, clip, rate, opacity, duration)) previousFrameNanos = 0L
     updateRepaint()
     mapboxMap.triggerRepaint()
   }
@@ -397,7 +405,7 @@ internal class AnimatedEntitiesController(
 
   private fun canRepaint(): Boolean =
     !disposed && viewAttached && hasActiveProbe() &&
-      (rigged.get()?.let { (!paused && it.playbackRate > 0.0) || it.needsPlacementFrame() }
+      (rigged.get()?.let { (!paused && it.playbackRate > 0.0) || it.needsPlacementFrame() || it.needsOpacityFrame() }
         ?: (!paused && (cube.get()?.rotationDegreesPerSecond ?: 0.0) != 0.0)) &&
       lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) == true &&
       ownsCurrentStyleHost() && host?.lastErrorCode?.get() == null && lastErrorCode == null &&
@@ -436,6 +444,7 @@ internal class AnimatedEntitiesController(
 
   private fun riggedDiagnostics(): Map<String, Any?> {
     val state = rigged.get()
+    val opacity = state?.opacitySnapshot()
     val modelHost = if (ownsCurrentStyleHost() && mapboxMap.isStyleLoaded()) host as? RiggedModelLayerHost else null
     return mapOf(
       "protocolVersion" to PROTOCOL_VERSION,
@@ -451,6 +460,9 @@ internal class AnimatedEntitiesController(
       "jointCount" to (state?.model?.jointNodes?.size ?: 0),
       "clipCount" to (state?.model?.clips?.size ?: 0),
       "clipIndex" to (state?.clipIndex ?: 0),
+      "opacity" to opacity?.value,
+      "targetOpacity" to opacity?.target,
+      "isOpacityAnimating" to opacity?.isAnimating,
       "lastErrorCode" to (modelLoadError ?: lastErrorCode ?: modelHost?.lastErrorCode?.get()),
       "incomingGlErrorCode" to modelHost?.incomingGlErrorCode?.get(),
     )

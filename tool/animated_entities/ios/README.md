@@ -28,3 +28,9 @@ The optional second GLB argument checks the original Khronos Fox fixture as well
 ```
 
 These checks include Fox UVs, the bounded embedded PNG decode, 24 joints and three distinct animated palettes; native clock rate continuity, clip reset primitives, dateline/heading short arcs, placement retarget continuity, and background suspension. The iOS integration test is still required to prove Metal texture upload, skinning, clip switching and placement rendering.
+
+Opacity checks cover hidden initialization, a fade that advances while the bone
+clock is paused, endpoint completion, repeated-target continuity, reversal and
+foreground suspension. They do not prove Metal blending or hidden GPU upload;
+the native integration fixture must check readiness with zero visible frames,
+reveal/hide, no invisible depth writes, and cached-resource reuse.

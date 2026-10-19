@@ -30,6 +30,29 @@ void main() {
     );
     expect(options.clipIndex, 0);
     expect(options.playbackRate, 1);
+    expect(options.opacity, 1);
+  });
+
+  test('accepts hidden preload and rejects invalid initial opacity', () {
+    final options = NativeRiggedModelProbeOptions(
+      glbBytes: _header(),
+      latitude: 0,
+      longitude: 0,
+      opacity: 0,
+      paused: true,
+    );
+    expect(options.opacity, 0);
+    for (final opacity in [-0.1, 1.1, double.nan, double.infinity]) {
+      expect(
+        () => NativeRiggedModelProbeOptions(
+          glbBytes: _header(),
+          latitude: 0,
+          longitude: 0,
+          opacity: opacity,
+        ),
+        throwsArgumentError,
+      );
+    }
   });
 
   test(

@@ -91,6 +91,7 @@ void main() {
         'clipIndex': 0,
         'playbackRate': 1.0,
         'paused': false,
+        'opacity': 1.0,
       });
       expect(state.protocolVersion, 1);
       expect(state.ready, isTrue);
@@ -98,6 +99,71 @@ void main() {
       expect(state.animationTimeSeconds, 0.5);
       expect(state.incomingGlErrorCode, 'GL_INVALID_ENUM');
       expect(state.lastErrorCode, isNull);
+    },
+  );
+
+  test(
+    'prepares an invisible model and reveals it with a native fade',
+    () async {
+      final options = NativeRiggedModelProbeOptions(
+        glbBytes: _header(),
+        latitude: 10,
+        longitude: 106,
+        paused: true,
+        opacity: 0,
+      );
+      await map.nativeRiggedModelProbe.attachRiggedModel(options);
+      await map.nativeRiggedModelProbe.updateRiggedModel(
+        NativeRiggedModelProbeUpdate(
+          latitude: 10,
+          longitude: 106,
+          headingDegrees: 0,
+          opacity: 1,
+          opacityTransitionMilliseconds: 220,
+        ),
+      );
+      expect((calls.first.arguments as Map)['opacity'], 0.0);
+      expect((calls.first.arguments as Map)['paused'], isTrue);
+      expect(calls.last.arguments, {
+        'protocolVersion': 1,
+        'latitude': 10.0,
+        'longitude': 106.0,
+        'headingDegrees': 0.0,
+        'opacity': 1.0,
+        'opacityTransitionMilliseconds': 220,
+      });
+      response = {
+        ..._diagnostics(),
+        'opacity': 0.5,
+        'targetOpacity': 1.0,
+        'isOpacityAnimating': true,
+      };
+      final status = await map.nativeRiggedModelProbe.getDiagnostics();
+      expect(status.opacity, 0.5);
+      expect(status.targetOpacity, 1);
+      expect(status.isOpacityAnimating, isTrue);
+    },
+  );
+
+  test(
+    'validates optional fade diagnostics while accepting older hosts',
+    () async {
+      final old = await map.nativeRiggedModelProbe.getDiagnostics();
+      expect(old.opacity, isNull);
+      expect(old.targetOpacity, isNull);
+      expect(old.isOpacityAnimating, isNull);
+      for (final entry in <MapEntry<String, Object?>>[
+        const MapEntry('opacity', -0.1),
+        const MapEntry('targetOpacity', 1.1),
+        MapEntry('opacity', double.nan),
+        const MapEntry('isOpacityAnimating', 1),
+      ]) {
+        response = {..._diagnostics(), entry.key: entry.value};
+        await expectLater(
+          map.nativeRiggedModelProbe.getDiagnostics(),
+          throwsFormatException,
+        );
+      }
     },
   );
 
