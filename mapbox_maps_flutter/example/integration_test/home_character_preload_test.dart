@@ -369,9 +369,37 @@ void main() {
         'visible pose clock advances',
       );
       await _native(tester, () => map.nativeRiggedModelProbe.setPaused(true));
-      final frozen = await waitModel((d) => !d.repaintEnabled, 'paused again');
+      var frozen = await waitModel((d) => !d.repaintEnabled, 'paused again');
+      final pausedTime = frozen.animationTimeSeconds;
+      // Stopping the main-thread clock is not a fence for an in-flight GL pose.
+      // Two serial visible frames settle the evaluator at the paused clock,
+      // even if the first completed frame had already sampled an older time.
+      for (var frame = 0; frame < 2; frame++) {
+        final beforeFrames = frozen.renderedFrames;
+        await _native(
+          tester,
+          () => map.nativeRiggedModelProbe.updateRiggedModel(
+            NativeRiggedModelProbeUpdate(
+              latitude: _latitude + .00004,
+              longitude: _longitude + .00004,
+              headingDegrees: 270,
+              opacity: 1,
+            ),
+          ),
+        );
+        frozen = await waitModel(
+          (d) =>
+              d.paused &&
+              !d.repaintEnabled &&
+              d.opacity == 1 &&
+              d.renderedFrames > beforeFrames,
+          'paused GPU frame $frame settled',
+        );
+        expect(frozen.animationTimeSeconds, pausedTime);
+      }
       expect(frozen.animationTimeSeconds, greaterThan(0));
       observations.add(_record('animated_then_paused', animated));
+      observations.add(_record('paused_gpu_pose_settled', frozen));
 
       await _native(
         tester,
