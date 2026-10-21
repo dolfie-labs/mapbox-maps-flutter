@@ -24,7 +24,11 @@ internal class RiggedModelState(
   clipIndex: Int,
   playbackRate: Double,
   initialOpacity: Double = 1.0,
+  initialSkinColor: FloatArray = riggedColor("#FFD1B0"),
+  initialEyeColor: FloatArray = riggedColor("#874721"),
 ) {
+  val skinColor = AtomicReference(initialSkinColor)
+  val eyeColor = AtomicReference(initialEyeColor)
   val renderedFrames = AtomicLong()
   val poseRevision = AtomicLong()
   val evaluator = RiggedPoseEvaluator(model)
@@ -38,6 +42,16 @@ internal class RiggedModelState(
   val animationTimeSeconds get() = playback.get().seconds
 
   fun playbackSnapshot(): RiggedPlayback = playback.get()
+
+  fun retainPhase(previous: RiggedModelState?) {
+    if (previous == null || model.jointNodes.size != previous.model.jointNodes.size ||
+        !model.inverseBind.contentEquals(previous.model.inverseBind)) return
+    val before = previous.playbackSnapshot()
+    val current = playback.get()
+    if (before.clipIndex == current.clipIndex) {
+      playback.set(current.copy(seconds = before.seconds % model.clips[current.clipIndex].duration))
+    }
+  }
 
   fun advanceAnimation(deltaNanos: Long) {
     while (true) {
@@ -117,12 +131,19 @@ internal class RiggedModelLayerHost(
   private var program = 0
   private val buffers = IntArray(2)
   private val vertexArray = IntArray(1)
-  private val textures = IntArray(1)
+  private val textures = IntArray(state.model.parts.size * 2)
+  private val textureHandles = HashMap<Pair<RigTexture?, Boolean>, Int>()
+  private var textureUploadBuffer: ByteBuffer? = null
   private var matrixLocation = -1
   private var jointsLocation = -1
   private var colorLocation = -1
   private var textureLocation = -1
   private var opacityLocation = -1
+  private var maskLocation = -1
+  private var skinLocation = -1
+  private var eyeLocation = -1
+  private var wholeSkinLocation = -1
+  private var tintModeLocation = -1
   private val modelMatrix = DoubleArray(16)
   private val finalMatrix = FloatArray(16)
 
@@ -133,13 +154,18 @@ internal class RiggedModelLayerHost(
     observeIncomingGlError("initialize")
     if (!captureGlState("STATE_CAPTURE")) return
     try {
-      program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER, listOf("a_position", "a_joints", "a_weights", "a_texcoord"))
+      program = createProgram(VERTEX_SHADER.replace("u_joints[64]", "u_joints[${state.model.jointNodes.size}]"), FRAGMENT_SHADER, listOf("a_position", "a_joints", "a_weights", "a_texcoord"))
       checkGl("PROGRAM")
       matrixLocation = GLES20.glGetUniformLocation(program, "u_matrix")
       jointsLocation = GLES20.glGetUniformLocation(program, "u_joints[0]")
       colorLocation = GLES20.glGetUniformLocation(program, "u_color")
       textureLocation = GLES20.glGetUniformLocation(program, "u_texture")
       opacityLocation = GLES20.glGetUniformLocation(program, "u_opacity")
+      maskLocation = GLES20.glGetUniformLocation(program, "u_mask")
+      skinLocation = GLES20.glGetUniformLocation(program, "u_skin")
+      eyeLocation = GLES20.glGetUniformLocation(program, "u_eye")
+      wholeSkinLocation = GLES20.glGetUniformLocation(program, "u_wholeSkin")
+      tintModeLocation = GLES20.glGetUniformLocation(program, "u_tintMode")
       checkGpu(matrixLocation >= 0 && jointsLocation >= 0 && colorLocation >= 0 && textureLocation >= 0 && opacityLocation >= 0, "GLES_SHADER_INTERFACE_INVALID")
       GLES20.glGenBuffers(2, buffers, 0)
       GLES30.glGenVertexArrays(1, vertexArray, 0)
@@ -171,15 +197,30 @@ internal class RiggedModelLayerHost(
       GLES20.glEnableVertexAttribArray(3)
       GLES20.glVertexAttribPointer(3, 2, GLES20.GL_FLOAT, false, STRIDE, 11 * Float.SIZE_BYTES)
       checkGl("VERTEX_ATTRIBUTES")
-      uploadTexture(model.texture)
+      val uploadCapacity = model.parts.maxOf { part ->
+        maxOf((part.texture?.let { it.width * it.height * 4 } ?: 4),
+          (part.mask?.let { it.width * it.height * 4 } ?: 4))
+      }
+      textureUploadBuffer = ByteBuffer.allocateDirect(uploadCapacity).order(ByteOrder.nativeOrder())
+      for ((index, part) in model.parts.withIndex()) {
+        uploadTexture(part.texture, index * 2, false)
+        uploadTexture(part.mask, index * 2 + 1, true)
+      }
       initialized.set(true)
     } catch (error: GpuException) {
       recordFailure(error.code)
+      deleteResources()
+    } catch (error: GlbException) {
+      recordFailure("GLES_TEXTURE_DECODE_${error.code}")
+      deleteResources()
+    } catch (_: OutOfMemoryError) {
+      recordFailure("GLES_TEXTURE_MEMORY_EXHAUSTED")
       deleteResources()
     } catch (error: RuntimeException) {
       recordFailure("GLES_MODEL_INIT_EXCEPTION_${error.javaClass.simpleName}")
       deleteResources()
     } finally {
+      textureUploadBuffer = null
       restoreGlState()
       if (lastErrorCode.get() != null) initialized.set(false)
     }
@@ -228,13 +269,23 @@ internal class RiggedModelLayerHost(
       GLES30.glBindVertexArray(vertexArray[0])
       GLES20.glUniformMatrix4fv(matrixLocation, 1, false, finalMatrix, 0)
       GLES20.glUniformMatrix4fv(jointsLocation, state.model.jointNodes.size, false, state.evaluator.palette, 0)
-      GLES20.glUniform4fv(colorLocation, 1, state.model.color, 0)
       GLES20.glUniform1f(opacityLocation, opacity.toFloat())
-      GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-      GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0])
-      GLES30.glBindSampler(0, 0)
+      GLES20.glUniform3fv(skinLocation, 1, state.skinColor.get(), 0)
+      GLES20.glUniform3fv(eyeLocation, 1, state.eyeColor.get(), 0)
       GLES20.glUniform1i(textureLocation, 0)
-      GLES20.glDrawElements(GLES20.GL_TRIANGLES, state.model.indices.size, GLES20.GL_UNSIGNED_INT, 0)
+      GLES20.glUniform1i(maskLocation, 1)
+      for ((index, part) in state.model.parts.withIndex()) {
+        GLES20.glUniform4fv(colorLocation, 1, part.color, 0)
+        GLES20.glUniform1f(wholeSkinLocation, if (part.skin) 1f else 0f)
+        GLES20.glUniform1f(tintModeLocation, part.tintMode.shaderValue)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[index * 2])
+        GLES30.glBindSampler(0, 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[index * 2 + 1])
+        GLES30.glBindSampler(1, 0)
+        GLES20.glDrawElements(GLES20.GL_TRIANGLES, part.indexCount, GLES20.GL_UNSIGNED_INT, part.firstIndex * Int.SIZE_BYTES)
+      }
       checkGl("SKINNED_DRAW")
       drew = true
     } catch (error: GpuException) {
@@ -287,7 +338,9 @@ internal class RiggedModelLayerHost(
     program = 0
     buffers.fill(0)
     vertexArray[0] = 0
-    textures[0] = 0
+    textures.fill(0)
+    textureHandles.clear()
+    releaseTexturePixels()
   }
 
   override fun deinitialize() { initialized.set(false); deleteResources() }
@@ -295,19 +348,33 @@ internal class RiggedModelLayerHost(
   private fun deleteResources() {
     if (vertexArray[0] != 0) GLES30.glDeleteVertexArrays(1, vertexArray, 0)
     GLES20.glDeleteBuffers(2, buffers, 0)
-    GLES20.glDeleteTextures(1, textures, 0)
+    val uniqueTextures = textures.filter { it != 0 }.distinct().toIntArray()
+    GLES20.glDeleteTextures(uniqueTextures.size, uniqueTextures, 0)
     if (program != 0) GLES20.glDeleteProgram(program)
     buffers.fill(0)
     vertexArray[0] = 0
     program = 0
-    textures[0] = 0
+    textures.fill(0)
+    textureHandles.clear()
+    releaseTexturePixels()
   }
 
-  private fun uploadTexture(texture: RigTexture?) {
-    GLES20.glGenTextures(1, textures, 0)
-    checkGpu(textures[0] != 0, "GLES_TEXTURE_CREATION_FAILED")
+  private fun releaseTexturePixels() {
+    // Include parts not yet uploaded after initialization failure. The bounded
+    // compressed sources remain available for a later host/context retry.
+    for (part in state.model.parts) {
+      part.texture?.releasePixels()
+      part.mask?.releasePixels()
+    }
+  }
+
+  private fun uploadTexture(texture: RigTexture?, index: Int, mask: Boolean) {
+    val key = texture to (texture == null && mask)
+    textureHandles[key]?.let { textures[index] = it; return }
+    GLES20.glGenTextures(1, textures, index)
+    checkGpu(textures[index] != 0, "GLES_TEXTURE_CREATION_FAILED")
     GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0])
+    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[index])
     GLES30.glBindSampler(0, 0)
     GLES20.glBindBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER, 0)
     GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 4)
@@ -319,18 +386,24 @@ internal class RiggedModelLayerHost(
     GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, texture?.magFilter ?: GLES20.GL_LINEAR)
     GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, texture?.wrapS ?: GLES20.GL_CLAMP_TO_EDGE)
     GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, texture?.wrapT ?: GLES20.GL_CLAMP_TO_EDGE)
-    val rgba = texture?.rgba ?: byteArrayOf(-1, -1, -1, -1)
-    val pixels = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder()).apply { put(rgba); position(0) }
+    val rgba = texture?.pixels() ?: if (mask) byteArrayOf(0, 0, 0, -1) else byteArrayOf(-1, -1, -1, -1)
+    // glTexImage2D consumes the client bytes before returning; reuse one bounded
+    // staging buffer across all materials instead of one direct allocation each.
+    val pixels = checkNotNull(textureUploadBuffer).apply { clear(); put(rgba); flip() }
     GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, texture?.width ?: 1, texture?.height ?: 1, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
     if (minFilter in GLES20.GL_NEAREST_MIPMAP_NEAREST..GLES20.GL_LINEAR_MIPMAP_LINEAR) GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
     checkGl("TEXTURE_UPLOAD")
+    textureHandles[key] = textures[index]
+    // GPU storage is now independent. Keep only the bounded compressed source
+    // for future style/context recreation instead of retaining ~50 MiB/actor.
+    texture?.releasePixels()
   }
 
   private companion object {
     const val STRIDE = 13 * Float.SIZE_BYTES
     val VERTEX_SHADER = """
       uniform mat4 u_matrix;
-      uniform mat4 u_joints[32];
+      uniform mat4 u_joints[64];
       attribute vec3 a_position;
       attribute vec4 a_joints;
       attribute vec4 a_weights;
@@ -347,12 +420,70 @@ internal class RiggedModelLayerHost(
     """.trimIndent()
     // Intentional unlit base-color factor/texture subset; no PBR approximation.
     val FRAGMENT_SHADER = """
-      precision mediump float;
+      precision highp float;
       uniform vec4 u_color;
       uniform sampler2D u_texture;
       uniform float u_opacity;
+      uniform sampler2D u_mask;
+      uniform vec3 u_skin;
+      uniform vec3 u_eye;
+      uniform float u_wholeSkin;
+      uniform float u_tintMode;
       varying highp vec2 v_texcoord;
-      void main() { gl_FragColor = vec4(u_color.rgb * texture2D(u_texture, v_texcoord).rgb, u_opacity); }
+      vec3 linearColor(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c)); }
+      vec3 srgbColor(vec3 c) { return mix(c * 12.92, 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c)); }
+      vec3 customizerHsv(vec3 rgb) {
+        float maximum = max(rgb.r, max(rgb.g, rgb.b)), minimum = min(rgb.r, min(rgb.g, rgb.b));
+        float difference = maximum - minimum;
+        if (difference <= 0.0) return vec3(0.0, 0.0, maximum);
+        float hue;
+        if (maximum == rgb.r) hue = (rgb.g - rgb.b) / difference + (rgb.g < rgb.b ? 6.0 : 0.0);
+        else if (maximum == rgb.g) hue = (rgb.b - rgb.r) / difference + 2.0;
+        else hue = (rgb.r - rgb.g) / difference + 4.0;
+        return vec3(hue / 6.0, maximum > 0.0 ? difference / maximum : 0.0, maximum);
+      }
+      vec3 customizerRgb(vec3 hsv) {
+        vec3 p = abs(fract(hsv.xxx + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+        return hsv.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), hsv.y);
+      }
+      float customizerLipValue(vec3 skin) {
+        vec3 reference = vec3(0.88792324, 0.38132605, 0.1559265), luminance = vec3(0.2126, 0.7152, 0.0722);
+        return clamp(sqrt(dot(skin, luminance) / dot(reference, luminance)), 0.2, 1.2);
+      }
+      vec3 customizerColor(vec3 base, vec3 mask, vec3 skin, vec3 eye) {
+        vec3 result = mix(base, base * skin / vec3(0.88792324, 0.38132605, 0.1559265), mask.r);
+        vec3 value = customizerHsv(result), target = customizerHsv(eye);
+        vec3 reference = vec3(0.03481012658227848, 0.8777777777777778, 0.18);
+        value.x = fract(value.x + target.x - reference.x);
+        value.y = clamp(value.y * target.y / reference.y, 0.0, 1.0);
+        value.z *= clamp(target.z / reference.z, 0.25, 1.4);
+        result = mix(result, customizerRgb(value), mask.g);
+        return max(result * (1.0 + mask.b * (customizerLipValue(skin) - 1.0)), vec3(0.0));
+      }
+      void main() {
+        vec3 mask = texture2D(u_mask, v_texcoord).rgb;
+        vec3 base = u_color.rgb * linearColor(texture2D(u_texture, v_texcoord).rgb);
+        vec3 color;
+        if (u_tintMode > 2.5) color = base * customizerLipValue(u_skin);
+        else if (u_tintMode > 1.5) color = base * u_skin / vec3(0.88792324, 0.38132605, 0.1559265);
+        else if (u_tintMode > 0.5) color = customizerColor(base, mask, u_skin, u_eye);
+        else {
+          mask = mix(mask, vec3(1.0, 0.0, 0.0), u_wholeSkin);
+          mask /= max(1.0, mask.x + mask.y);
+          vec3 tint = vec3(1.0 - mask.x - mask.y) + mask.x * u_skin + mask.y * u_eye;
+          color = base * tint;
+        }
+        gl_FragColor = vec4(srgbColor(color), u_opacity);
+      }
     """.trimIndent()
+  }
+}
+
+/** Converts the legacy sRGB transport into the renderer's linear uniforms. */
+internal fun riggedColor(value: String): FloatArray {
+  require(Regex("#[0-9a-fA-F]{6}").matches(value))
+  return FloatArray(3) {
+    val srgb = value.substring(1 + it * 2, 3 + it * 2).toInt(16) / 255f
+    if (srgb <= 0.04045f) srgb / 12.92f else ((srgb + 0.055f) / 1.055f).pow(2.4f)
   }
 }

@@ -251,6 +251,8 @@ internal class AnimatedEntitiesController(
     val heading = number("headingDegrees")
     val rate = number("playbackRate")
     val opacity = if (arguments.containsKey("opacity")) number("opacity").also { require(it in 0.0..1.0) } else 1.0
+    val skinColor = readPaletteOverride(arguments, "skinColor")
+    val eyeColor = readPaletteOverride(arguments, "eyeColor")
     val index = arguments["clipIndex"]
     require(index is Int || index is Long)
     val clipIndex = (index as Number).toLong()
@@ -268,7 +270,9 @@ internal class AnimatedEntitiesController(
       try {
         val model = RiggedGlbLoader.decode(bytes)
         if (clipIndex >= model.clips.size) throw GlbException("INVALID_ARGUMENTS")
-        decoded = RiggedModelState(model, latitude, longitude, altitude, height, heading, clipIndex.toInt(), rate, opacity)
+        decoded = RiggedModelState(model, latitude, longitude, altitude, height, heading, clipIndex.toInt(), rate, opacity,
+          skinColor ?: if (model.usesCustomizer) RiggedCustomizerTint.skinReference.copyOf() else riggedColor("#FFD1B0"),
+          eyeColor ?: if (model.usesCustomizer) RiggedCustomizerTint.eyeReference.copyOf() else riggedColor("#874721"))
       } catch (error: GlbException) {
         failure = error.code
       } catch (_: RuntimeException) {
@@ -291,6 +295,7 @@ internal class AnimatedEntitiesController(
           // No existing scene/model is replaced until CPU validation succeeds.
           removeLayer()
           cube.set(null)
+          accepted.retainPhase(rigged.get())
           rigged.set(accepted)
           paused = nextPaused
           previousFrameNanos = 0L
@@ -349,9 +354,29 @@ internal class AnimatedEntitiesController(
       require(value is Int || value is Long)
       (value as Number).toLong().also { require(it in 0L..1000L) }
     } else 0L
+    val skinColor = readPaletteOverride(arguments, "skinColor")
+    val eyeColor = readPaletteOverride(arguments, "eyeColor")
+    if (skinColor != null) model.skinColor.set(skinColor)
+    if (eyeColor != null) model.eyeColor.set(eyeColor)
     if (model.update(latitude, longitude, heading, clip, rate, opacity, duration)) previousFrameNanos = 0L
     updateRepaint()
     mapboxMap.triggerRepaint()
+  }
+
+  private fun readPaletteOverride(arguments: Map<*, *>, key: String): FloatArray? {
+    if (arguments.containsKey(key + "Linear")) {
+      val values = arguments[key + "Linear"]
+      require(values is List<*> && values.size == 3)
+      return FloatArray(3) { index ->
+        val value = values[index]
+        require(value is Number && value.toDouble().isFinite() && value.toDouble() in 0.001..1.0)
+        value.toFloat()
+      }
+    }
+    if (!arguments.containsKey(key)) return null
+    val value = arguments[key]
+    require(value is String)
+    return riggedColor(value)
   }
 
   private fun hasActiveProbe(): Boolean = cube.get() != null || rigged.get() != null

@@ -20,6 +20,62 @@ void main() {
     },
   );
 
+  test('palette uniforms accept sRGB colors and reject malformed input', () {
+    final update = NativeRiggedModelProbeUpdate(
+      latitude: 0,
+      longitude: 0,
+      headingDegrees: 0,
+      skinColor: '#472112',
+      eyeColor: '#2666A6',
+    );
+    expect(update.skinColor, '#472112');
+    expect(update.eyeColor, '#2666A6');
+    for (final value in ['red', '#123', '#1234567', '#GG0000', ' #123456']) {
+      expect(
+        () => NativeRiggedModelProbeUpdate(
+          latitude: 0,
+          longitude: 0,
+          headingDegrees: 0,
+          skinColor: value,
+        ),
+        throwsArgumentError,
+      );
+    }
+  });
+
+  test('copies exact linear targets and rejects invalid linear components', () {
+    final input = <double>[0.88792324, 0.38132605, 0.1559265];
+    final update = NativeRiggedModelProbeUpdate(
+      latitude: 0,
+      longitude: 0,
+      headingDegrees: 0,
+      skinColorLinear: input,
+    );
+    input[0] = 0.1;
+    expect(update.skinColorLinear, [0.88792324, 0.38132605, 0.1559265]);
+    expect(() => update.skinColorLinear![0] = 0.3, throwsUnsupportedError);
+    expect(update.eyeColorLinear, isNull);
+    for (final invalid in <List<double>>[
+      [],
+      [0.1, 0.2],
+      [0.1, 0.2, 0.3, 0.4],
+      [0, 0.2, 0.3],
+      [1.01, 0.2, 0.3],
+      [double.nan, 0.2, 0.3],
+      [double.infinity, 0.2, 0.3],
+    ]) {
+      expect(
+        () => NativeRiggedModelProbeUpdate(
+          latitude: 0,
+          longitude: 0,
+          headingDegrees: 0,
+          eyeColorLinear: invalid,
+        ),
+        throwsArgumentError,
+      );
+    }
+  });
+
   test('hidden preload and native fade accept bounded opacity values', () {
     for (final opacity in [0.0, 0.5, 1.0]) {
       final update = NativeRiggedModelProbeUpdate(

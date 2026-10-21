@@ -20,6 +20,10 @@ class _NativeRiggedModelProbeChannel
       'playbackRate': options.playbackRate,
       'paused': options.paused,
       'opacity': options.opacity,
+      if (options.hasSkinColorOverride) 'skinColor': options.skinColor,
+      if (options.hasEyeColorOverride) 'eyeColor': options.eyeColor,
+      'skinColorLinear': ?options.skinColorLinear,
+      'eyeColorLinear': ?options.eyeColorLinear,
     });
   }
 
@@ -29,6 +33,8 @@ class _NativeRiggedModelProbeChannel
     final playbackRate = update.playbackRate;
     final opacity = update.opacity;
     final opacityTransitionMilliseconds = update.opacityTransitionMilliseconds;
+    final skinColor = update.skinColor;
+    final eyeColor = update.eyeColor;
     await _channel._invoke('updateRiggedModel', {
       'latitude': update.latitude,
       'longitude': update.longitude,
@@ -37,6 +43,10 @@ class _NativeRiggedModelProbeChannel
       'playbackRate': ?playbackRate,
       'opacity': ?opacity,
       'opacityTransitionMilliseconds': ?opacityTransitionMilliseconds,
+      'skinColor': ?skinColor,
+      'eyeColor': ?eyeColor,
+      'skinColorLinear': ?update.skinColorLinear,
+      'eyeColorLinear': ?update.eyeColorLinear,
     });
   }
 

@@ -13,6 +13,8 @@ struct MoveyRiggedConfiguration {
     let clipIndex: Int
     let playbackRate: Double
     let opacity: Double
+    let skinColor: SIMD4<Float>
+    let eyeColor: SIMD4<Float>
 }
 
 /// The CPU asset crosses threads as an immutable snapshot. Metal resource
@@ -52,12 +54,15 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
     private var transparentDepthState: MTLDepthStencilState?
     private var vertexBuffer: MTLBuffer?
     private var indexBuffer: MTLBuffer?
-    private var baseColorTexture: MTLTexture?
-    private var textureSampler: MTLSamplerState?
+    private var textures: [(MTLTexture, MTLSamplerState)] = []
+    private var whiteTexture: (MTLTexture, MTLSamplerState)?
+    private var blackTexture: (MTLTexture, MTLSamplerState)?
     private var uploadedGeneration = -1
 
     func configure(asset: MoveyRiggedAsset, configuration: MoveyRiggedConfiguration) {
         lock.lock()
+        advanceClock(now: CACurrentMediaTime())
+        let retainPhase = self.configuration?.clipIndex == configuration.clipIndex && self.asset?.hasSameRig(as: asset) == true
         self.asset = asset
         self.configuration = configuration
         generation += 1
@@ -65,7 +70,8 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         renderedFrames = 0
         poseRevision = 0
         measuredPalette = nil
-        clock.reset()
+        if retainPhase { clock.retime(duration: asset.clips[configuration.clipIndex].duration) }
+        else { clock.reset() }
         opacity = MoveyRiggedOpacityTween(configuration.opacity, now: CACurrentMediaTime())
         opacity.setSuspended(!foreground, now: CACurrentMediaTime())
         var tween = MoveyRiggedPlacementTween(.init(latitude: configuration.latitude, longitude: configuration.longitude,
@@ -118,7 +124,8 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
     /// resources remain unchanged for GPS, heading, clip and rate updates.
     func update(latitude: Double, longitude: Double, headingDegrees: Double,
                 clipIndex: Int?, playbackRate: Double?, opacity newOpacity: Double?,
-                opacityTransitionMilliseconds: Int?) -> String? {
+                opacityTransitionMilliseconds: Int?, skinColor: SIMD4<Float>? = nil,
+                eyeColor: SIMD4<Float>? = nil) -> String? {
         lock.lock(); defer { lock.unlock() }
         guard let asset, let current = configuration else { return "MODEL_NOT_ATTACHED" }
         let clip = clipIndex ?? current.clipIndex
@@ -130,7 +137,8 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         configuration = MoveyRiggedConfiguration(latitude: latitude, longitude: longitude,
             altitudeMeters: current.altitudeMeters, heightMeters: current.heightMeters, headingDegrees: headingDegrees,
             clipIndex: clip, playbackRate: playbackRate ?? current.playbackRate,
-            opacity: newOpacity ?? current.opacity)
+            opacity: newOpacity ?? current.opacity,
+            skinColor: skinColor ?? current.skinColor, eyeColor: eyeColor ?? current.eyeColor)
         // Establish the same clock boundary for a new rate without a time jump.
         advanceClock(now: now)
         let next = MoveyRiggedPlacement(latitude: latitude, longitude: longitude, headingDegrees: headingDegrees)
@@ -226,11 +234,20 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
                 return device.makeBuffer(bytes: base, length: values.count * MemoryLayout<UInt32>.stride, options: [])
             }
             guard let newVertices, let newIndices else { recordError("METAL_BUFFER_UNAVAILABLE"); return }
-            guard let material = makeTexture(asset.texture, device: device, commandBuffer: mtlCommandBuffer) else {
+            var uploadedTextures: [(MTLTexture, MTLSamplerState)] = []
+            for image in asset.textures {
+                guard let texture = makeTexture(image, device: device, commandBuffer: mtlCommandBuffer) else {
+                    recordError("METAL_TEXTURE_UNAVAILABLE"); return
+                }
+                uploadedTextures.append(texture)
+            }
+            guard let white = makeTexture(nil, device: device, commandBuffer: mtlCommandBuffer),
+                  let black = makeTexture(nil, fallback: Data([0, 0, 0, 255]), device: device, commandBuffer: mtlCommandBuffer) else {
                 recordError("METAL_TEXTURE_UNAVAILABLE"); return
             }
-            baseColorTexture = material.0
-            textureSampler = material.1
+            textures = uploadedTextures
+            whiteTexture = white
+            blackTexture = black
             vertexBuffer = newVertices
             indexBuffer = newIndices
             uploadedGeneration = snapshotGeneration
@@ -240,7 +257,7 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         }
         // A hidden prewarm uploads real GPU resources but never touches depth.
         guard snapshotOpacity > 0 else { return }
-        guard let vertices = vertexBuffer, let indices = indexBuffer, let materialTexture = baseColorTexture, let sampler = textureSampler,
+        guard let vertices = vertexBuffer, let indices = indexBuffer, let white = whiteTexture, let black = blackTexture,
               let pose = asset.pose(time: time, clipIndex: configuration.clipIndex),
               var matrix = MoveyGeographicMatrix.make(parameters, latitude: position.latitude, longitude: position.longitude,
                                                        altitudeMeters: configuration.altitudeMeters, sizeMeters: configuration.heightMeters,
@@ -267,13 +284,24 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         pose.palette.withUnsafeBufferPointer { values in
             if let base = values.baseAddress { encoder.setVertexBytes(base, length: values.count * MemoryLayout<simd_float4x4>.stride, index: 2) }
         }
-        var color = asset.baseColor
-        encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
         var visibleOpacity = Float(snapshotOpacity)
         encoder.setFragmentBytes(&visibleOpacity, length: MemoryLayout<Float>.stride, index: 1)
-        encoder.setFragmentTexture(materialTexture, index: 0)
-        encoder.setFragmentSamplerState(sampler, index: 0)
-        encoder.drawIndexedPrimitives(type: .triangle, indexCount: asset.indices.count, indexType: .uint32, indexBuffer: indices, indexBufferOffset: 0)
+        for part in asset.parts {
+            let base = part.textureIndex.map { textures[$0] } ?? white
+            let mask = part.tintMaskTextureIndex.map { textures[$0] } ?? black
+            var color = part.baseColor
+            var palette = [configuration.skinColor, configuration.eyeColor, SIMD4<Float>(part.skin ? 1 : 0, Float(part.tintMode.rawValue), 0, 0)]
+            encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+            palette.withUnsafeMutableBufferPointer { values in
+                if let address = values.baseAddress { encoder.setFragmentBytes(address, length: values.count * MemoryLayout<SIMD4<Float>>.stride, index: 2) }
+            }
+            encoder.setFragmentTexture(base.0, index: 0)
+            encoder.setFragmentTexture(mask.0, index: 1)
+            encoder.setFragmentSamplerState(base.1, index: 0)
+            encoder.setFragmentSamplerState(mask.1, index: 1)
+            encoder.drawIndexedPrimitives(type: .triangle, indexCount: part.indexCount, indexType: .uint32,
+                indexBuffer: indices, indexBufferOffset: part.firstIndex * MemoryLayout<UInt32>.stride)
+        }
         encoder.endEncoding()
         // Mapbox owns submission, presentation and the render target.
         lock.lock()
@@ -290,13 +318,14 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         transparentDepthState = nil
         vertexBuffer = nil
         indexBuffer = nil
-        baseColorTexture = nil
-        textureSampler = nil
+        textures.removeAll()
+        whiteTexture = nil
+        blackTexture = nil
         uploadedGeneration = -1
         lock.lock(); ready = false; clock.suspend(); lock.unlock()
     }
 
-    private func makeTexture(_ image: MoveyRiggedTexture?, device: MTLDevice,
+    private func makeTexture(_ image: MoveyRiggedTexture?, fallback: Data = Data([255, 255, 255, 255]), device: MTLDevice,
                              commandBuffer: MTLCommandBuffer) -> (MTLTexture, MTLSamplerState)? {
         let width = image?.width ?? 1, height = image?.height ?? 1
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height,
@@ -304,7 +333,7 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
         descriptor.usage = .shaderRead
         descriptor.storageMode = .shared
         guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
-        let rgba = image?.rgba ?? Data([255, 255, 255, 255])
+        let rgba = image?.rgba ?? fallback
         rgba.withUnsafeBytes { bytes in
             if let base = bytes.baseAddress { texture.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0,
                                                               withBytes: base, bytesPerRow: width * 4) }
@@ -342,10 +371,59 @@ final class MoveyRiggedModelRenderer: NSObject, CustomLayerHost {
                      + (jointWorldInverseBind[v.joints.w] * v.position) * v.weights.w;
         SkinOutput output; output.position = mvp * world; output.uv = v.uv; return output;
     }
+    float3 srgbToLinear(float3 value) {
+        return select(pow((value + 0.055) / 1.055, float3(2.4)), value / 12.92, value <= 0.04045);
+    }
+    float3 linearToSrgb(float3 value) {
+        value = max(value, float3(0.0));
+        return select(1.055 * pow(value, float3(1.0 / 2.4)) - 0.055, value * 12.92, value <= 0.0031308);
+    }
+    float3 customizerHsv(float3 rgb) {
+        float maximum = max(rgb.r, max(rgb.g, rgb.b)), minimum = min(rgb.r, min(rgb.g, rgb.b));
+        float difference = maximum - minimum;
+        if (difference <= 0.0) return float3(0.0, 0.0, maximum);
+        float hue;
+        if (maximum == rgb.r) hue = (rgb.g - rgb.b) / difference + (rgb.g < rgb.b ? 6.0 : 0.0);
+        else if (maximum == rgb.g) hue = (rgb.b - rgb.r) / difference + 2.0;
+        else hue = (rgb.r - rgb.g) / difference + 4.0;
+        return float3(hue / 6.0, maximum > 0.0 ? difference / maximum : 0.0, maximum);
+    }
+    float3 customizerRgb(float3 hsv) {
+        float3 p = abs(fract(hsv.xxx + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+        return hsv.z * mix(float3(1.0), clamp(p - 1.0, 0.0, 1.0), hsv.y);
+    }
+    float customizerLipValue(float3 skin) {
+        const float3 reference = float3(0.88792324, 0.38132605, 0.1559265);
+        const float3 luminance = float3(0.2126, 0.7152, 0.0722);
+        return clamp(sqrt(dot(skin, luminance) / dot(reference, luminance)), 0.2, 1.2);
+    }
+    float3 customizerColor(float3 base, float3 mask, float3 skin, float3 eye) {
+        float3 result = mix(base, base * skin / float3(0.88792324, 0.38132605, 0.1559265), mask.r);
+        float3 value = customizerHsv(result), target = customizerHsv(eye);
+        const float3 reference = float3(0.03481012658227848, 0.8777777777777778, 0.18);
+        value.x = fract(value.x + target.x - reference.x);
+        value.y = clamp(value.y * target.y / reference.y, 0.0, 1.0);
+        value.z *= clamp(target.z / reference.z, 0.25, 1.4);
+        result = mix(result, customizerRgb(value), mask.g);
+        return max(result * (1.0 + mask.b * (customizerLipValue(skin) - 1.0)), float3(0.0));
+    }
     fragment float4 moveySkinFragment(SkinOutput input [[stage_in]], constant float4 &baseColor [[buffer(0)]],
-        constant float &opacity [[buffer(1)]],
-        texture2d<float> baseTexture [[texture(0)]], sampler baseSampler [[sampler(0)]]) {
-        return float4(baseTexture.sample(baseSampler, input.uv).rgb * baseColor.rgb, opacity);
+        constant float &opacity [[buffer(1)]], constant float4 *palette [[buffer(2)]],
+        texture2d<float> baseTexture [[texture(0)]], texture2d<float> maskTexture [[texture(1)]],
+        sampler baseSampler [[sampler(0)]], sampler maskSampler [[sampler(1)]]) {
+        float3 linearBase = srgbToLinear(baseTexture.sample(baseSampler, input.uv).rgb) * baseColor.rgb;
+        float3 mask = maskTexture.sample(maskSampler, input.uv).rgb;
+        float mode = palette[2].y;
+        float3 color;
+        if (mode > 2.5) color = linearBase * customizerLipValue(palette[0].rgb);
+        else if (mode > 1.5) color = linearBase * palette[0].rgb / float3(0.88792324, 0.38132605, 0.1559265);
+        else if (mode > 0.5) color = customizerColor(linearBase, mask, palette[0].rgb, palette[1].rgb);
+        else {
+            if (palette[2].x > 0.5) mask = float3(1.0, 0.0, 0.0);
+            float3 tint = float3(1.0 - mask.r - mask.g) + mask.r * palette[0].rgb + mask.g * palette[1].rgb;
+            color = linearBase * tint;
+        }
+        return float4(linearToSrgb(color), opacity);
     }
     """
 }

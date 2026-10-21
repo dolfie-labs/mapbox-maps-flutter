@@ -103,6 +103,50 @@ void main() {
   );
 
   test(
+    'transports exact immutable linear palette targets and explicit legacy overrides',
+    () async {
+      final skin = <double>[0.88792324, 0.38132605, 0.1559265];
+      final eye = <double>[0.18, 0.055, 0.022];
+      final options = NativeRiggedModelProbeOptions(
+        glbBytes: _header(),
+        latitude: 10,
+        longitude: 106,
+        skinColor: '#FFD1B0',
+        skinColorLinear: skin,
+        eyeColorLinear: eye,
+      );
+      skin[0] = 0.1;
+      await map.nativeRiggedModelProbe.attachRiggedModel(options);
+      final attached = calls.last.arguments as Map;
+      expect(attached['skinColor'], '#FFD1B0');
+      expect(attached.containsKey('eyeColor'), isFalse);
+      expect(attached['skinColorLinear'], [0.88792324, 0.38132605, 0.1559265]);
+      expect(attached['eyeColorLinear'], eye);
+      await map.nativeRiggedModelProbe.updateRiggedModel(
+        NativeRiggedModelProbeUpdate(
+          latitude: 10,
+          longitude: 106,
+          headingDegrees: 0,
+          eyeColorLinear: [
+            0.039681909478526005,
+            0.25295007623137683,
+            0.6559306827469925,
+          ],
+        ),
+      );
+      expect((calls.last.arguments as Map)['eyeColorLinear'], [
+        0.039681909478526005,
+        0.25295007623137683,
+        0.6559306827469925,
+      ]);
+      expect(
+        (calls.last.arguments as Map).containsKey('skinColorLinear'),
+        isFalse,
+      );
+    },
+  );
+
+  test(
     'prepares an invisible model and reveals it with a native fade',
     () async {
       final options = NativeRiggedModelProbeOptions(

@@ -143,12 +143,27 @@ final class MoveyAnimatedEntitiesHost: NSObject {
                 }
                 opacityTransitionMilliseconds = Int(duration)
             }
+            var skinColor: SIMD4<Float>?
+            var eyeColor: SIMD4<Float>?
+            if arguments["skinColor"] != nil || arguments["skinColorLinear"] != nil {
+                guard let color = paletteColor(arguments, "skinColor", fallback: MoveyCharacterPalette.defaultSkin) else {
+                    result(error("INVALID_ARGUMENTS", "skinColor must use #RRGGBB or skinColorLinear must contain three components in [0.001, 1].")); return
+                }
+                skinColor = color
+            }
+            if arguments["eyeColor"] != nil || arguments["eyeColorLinear"] != nil {
+                guard let color = paletteColor(arguments, "eyeColor", fallback: MoveyCharacterPalette.defaultEye) else {
+                    result(error("INVALID_ARGUMENTS", "eyeColor must use #RRGGBB or eyeColorLinear must contain three components in [0.001, 1].")); return
+                }
+                eyeColor = color
+            }
             guard attached, activeRigged else {
                 result(error("MODEL_NOT_ATTACHED", "A CPU-accepted rigged model is required before an update.")); return
             }
             if let code = riggedRenderer.update(latitude: latitude, longitude: longitude, headingDegrees: heading,
                                                  clipIndex: clipIndex, playbackRate: playbackRate, opacity: opacity,
-                                                 opacityTransitionMilliseconds: opacityTransitionMilliseconds) {
+                                                 opacityTransitionMilliseconds: opacityTransitionMilliseconds,
+                                                 skinColor: skinColor, eyeColor: eyeColor) {
                 result(error(code, "The model update could not be accepted.")); return
             }
             if let playbackRate { modelPlaybackRate = playbackRate }
@@ -201,13 +216,17 @@ final class MoveyAnimatedEntitiesHost: NSObject {
               let paused = boolean(arguments, "paused") else {
             result(error("INVALID_ARGUMENTS", "A rigged model requires GLB bytes, finite Mercator placement, a positive height, clip index and playback rate in [0, 4].")); return
         }
-        guard bytes.data.count <= MoveyGLBDecoder.maximumBytes else { result(error("GLB_TOO_LARGE", "A probe GLB must be at most 2 MiB.")); return }
+        guard bytes.data.count <= MoveyGLBDecoder.maximumBytes else { result(error("GLB_TOO_LARGE", "A character GLB must be at most 8 MiB.")); return }
         var opacity = 1.0
         if arguments["opacity"] != nil {
             guard let value = number(arguments, "opacity"), value >= 0, value <= 1 else {
                 result(error("INVALID_ARGUMENTS", "opacity must be in [0, 1].")); return
             }
             opacity = value
+        }
+        guard let skinColor = paletteColor(arguments, "skinColor", fallback: MoveyCharacterPalette.defaultSkin),
+              let eyeColor = paletteColor(arguments, "eyeColor", fallback: MoveyCharacterPalette.defaultEye) else {
+            result(error("INVALID_ARGUMENTS", "skinColor and eyeColor must use #RRGGBB or eyeColorLinear must contain three components in [0.001, 1].")); return
         }
         cancelLoad(code: "LOAD_SUPERSEDED")
         let generation = loadGeneration
@@ -217,13 +236,12 @@ final class MoveyAnimatedEntitiesHost: NSObject {
         requestedModel = true
         modelLoadError = nil
         let data = bytes.data
-        let configuration = MoveyRiggedConfiguration(latitude: latitude, longitude: longitude, altitudeMeters: altitude,
-                                                     heightMeters: height, headingDegrees: heading, clipIndex: Int(clip), playbackRate: rate,
-                                                     opacity: opacity)
+        let hasSkinOverride = arguments["skinColor"] != nil || arguments["skinColorLinear"] != nil
+        let hasEyeOverride = arguments["eyeColor"] != nil || arguments["eyeColorLinear"] != nil
         decodeQueue.async { [weak self] in
             let decoded: Result<MoveyRiggedAsset, Error> = Result {
                 let asset = try MoveyGLBDecoder.decode(data, cancellation: token)
-                guard asset.clips.indices.contains(configuration.clipIndex) else { throw MoveyGLBFailure.invalid("clipIndex is outside the GLB clips.") }
+                guard asset.clips.indices.contains(Int(clip)) else { throw MoveyGLBFailure.invalid("clipIndex is outside the GLB clips.") }
                 return asset
             }
             DispatchQueue.main.async { [weak self] in
@@ -237,6 +255,10 @@ final class MoveyAnimatedEntitiesHost: NSObject {
                     self.modelLoadError = typed.code
                     completion(self.error(typed.code, typed.message))
                 case .success(let asset):
+                    let configuration = MoveyRiggedConfiguration(latitude: latitude, longitude: longitude, altitudeMeters: altitude,
+                        heightMeters: height, headingDegrees: heading, clipIndex: Int(clip), playbackRate: rate, opacity: opacity,
+                        skinColor: asset.usesCustomizer && !hasSkinOverride ? MoveyCharacterPalette.customizerSkin : skinColor,
+                        eyeColor: asset.usesCustomizer && !hasEyeOverride ? MoveyCharacterPalette.customizerEye : eyeColor)
                     // CPU acceptance is transactional: failed decoding never removes the old probe.
                     if self.attached, !self.activeRigged, let failure = self.removeLayer() {
                         self.modelLoadError = failure.code
@@ -275,6 +297,11 @@ final class MoveyAnimatedEntitiesHost: NSObject {
     private func number(_ arguments: [String: Any], _ key: String) -> Double? {
         guard let value = arguments[key] as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(), value.doubleValue.isFinite else { return nil }
         return value.doubleValue
+    }
+    private func paletteColor(_ arguments: [String: Any], _ key: String, fallback: String) -> SIMD4<Float>? {
+        if let linear = arguments[key + "Linear"] { return MoveyCharacterPalette.linearComponents(linear) }
+        guard let value = (arguments[key] ?? fallback) as? String else { return nil }
+        return MoveyCharacterPalette.linear(value)
     }
     private func boolean(_ arguments: [String: Any], _ key: String) -> Bool? {
         guard let value = arguments[key] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }

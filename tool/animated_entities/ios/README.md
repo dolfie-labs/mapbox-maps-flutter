@@ -34,3 +34,58 @@ clock is paused, endpoint completion, repeated-target continuity, reversal and
 foreground suspension. They do not prove Metal blending or hidden GPU upload;
 the native integration fixture must check readiness with zero visible frames,
 reveal/hide, no invisible depth writes, and cached-resource reuse.
+
+The character decoder also accepts one shared skin with up to 64 joints, eight
+mesh nodes and sixteen primitives, flattened into shared vertex/index buffers.
+Limits are 8 MiB per GLB, 1024 accessors/bufferViews, sixteen embedded
+textures/images/samplers, 65536 total vertices, 196608 total indices and two
+million decoded animation scalars. Aggregate unique decoded texture pixels are
+capped at 16,777,216 (64 MiB RGBA) before image decompression; cached texture
+indices do not consume the budget twice. The existing per-image and animation-channel
+limits remain. CPU checks cover part index offsets, unsupported part counts,
+shared-skin enforcement, tint-mask metadata and sRGB palette decoding.
+
+An optional third GLB argument verifies a real Movey V5 assembled character
+(57 shared joints and three clips):
+
+```sh
+/private/tmp/movey-glb-check tool/animated_entities/fixtures/RiggedSimple.glb \
+  mapbox_maps_flutter/example/assets/animated_entities/Fox.glb \
+  /path/to/movey-male-outfit-v5.glb
+```
+
+The Customizer V5 material modes, exact linear palette transport and legacy
+neutral-atlas compatibility are specified in
+[`docs/MOVEY_CHARACTER_WARDROBE.md`](../../../docs/MOVEY_CHARACTER_WARDROBE.md).
+Omitted Customizer attach colors use the saved Original/Brown references;
+omitted updates preserve current colors. `skinColorLinear`/`eyeColorLinear`
+arrays take priority over legacy hex fields. Metal uses the original atlas,
+authored RGB mask and per-part modes without geometry-based mask heuristics.
+
+The CPU executable also reads `tool/animated_entities/fixtures/customizer-tint-cases.json`:
+13 independent one-pixel Cycles emission bakes of the actual saved Blender graph.
+It checks skin ratios, Blender HSV iris behavior, adaptive lip brightness,
+partial/overlapping masks and protected white against the production Swift
+implementation, with a 1e-5 tolerance. The Android counterpart is
+`tool/animated_entities/android/CustomizerTintChecks.kt` using the same fixture
+and production `RiggedCustomizerTint.kt`. These numerical checks complement,
+but do not replace, runtime GPU comparisons.
+
+The full Movey app simulator debug build for the `dev` flavor succeeded against
+this local SDK fork on 2026-10-21, compiling the production Swift bridge and
+renderer. The same native integration pilot also passed on the iPhone 17 Pro
+iOS 26.4 simulator: static Original/Tan-Blue comparisons, uniform-only palette
+updates, phase preservation, hidden preparation/reveal and six consecutive
+2K-atlas replacements. Screenshots and diagnostics are recorded in the sibling
+Movey app `tool/mapbox/reports/wardrobe/customizer-v5/ios/` directory. This is
+simulator evidence, without a physical-device performance claim.
+
+Outfit replacement preserves skeletal phase for the same selected clip only
+when shared-rig fingerprints, joint names/order, joint parents, rest transforms
+and inverse-bind matrices match. The phase is reduced modulo the new clip's
+duration; an initial attachment, changed clip or different rig resets it. CPU
+checks exercise rig matching, differing joint identity and the retime boundary.
+
+The local full Movey app simulator debug build for the `dev` flavor also
+succeeded against the local SDK fork on 2026-10-20. This compiles the production
+Swift bridge and renderer; no iOS install or runtime shader validation was done.

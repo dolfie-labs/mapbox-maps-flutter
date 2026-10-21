@@ -18,7 +18,17 @@ final class NativeRiggedModelProbeOptions {
     this.playbackRate = 1,
     this.paused = false,
     this.opacity = 1,
-  }) : glbBytes = _copyGlb(glbBytes) {
+    String? skinColor,
+    String? eyeColor,
+    List<double>? skinColorLinear,
+    List<double>? eyeColorLinear,
+  }) : glbBytes = _copyGlb(glbBytes),
+       skinColor = skinColor ?? '#FFD1B0',
+       eyeColor = eyeColor ?? '#874721',
+       hasSkinColorOverride = skinColor != null,
+       hasEyeColorOverride = eyeColor != null,
+       skinColorLinear = _copyLinearColor(skinColorLinear),
+       eyeColorLinear = _copyLinearColor(eyeColorLinear) {
     if (!latitude.isFinite ||
         latitude.abs() > NativeCubeProbeOptions.mercatorLatitudeLimit) {
       throw ArgumentError.value(latitude, 'latitude', 'Outside Mercator range');
@@ -50,13 +60,15 @@ final class NativeRiggedModelProbeOptions {
       throw ArgumentError.value(playbackRate, 'playbackRate', 'Outside [0, 4]');
     }
     _validateOpacity(opacity);
+    if (skinColor != null) _validateColor(skinColor);
+    if (eyeColor != null) _validateColor(eyeColor);
   }
 
-  static const maxGlbBytes = 2 * 1024 * 1024;
+  static const maxGlbBytes = 8 * 1024 * 1024;
 
   static Uint8List _copyGlb(Uint8List bytes) {
     if (bytes.length > maxGlbBytes) {
-      throw ArgumentError.value(bytes.length, 'glbBytes', 'Exceeds 2 MiB');
+      throw ArgumentError.value(bytes.length, 'glbBytes', 'Exceeds 8 MiB');
     }
     if (bytes.length < 12) {
       throw ArgumentError('glbBytes must contain a GLB 2 header');
@@ -82,6 +94,17 @@ final class NativeRiggedModelProbeOptions {
 
   /// Zero prepares GPU resources without drawing or writing depth.
   final double opacity;
+  final String skinColor;
+  final String eyeColor;
+
+  /// Distinguishes an explicit legacy sRGB override from native asset defaults.
+  final bool hasSkinColorOverride;
+  final bool hasEyeColorOverride;
+
+  /// Exact linear sRGB targets, each three finite components in [0.001, 1].
+  /// These take precedence over the matching legacy hex override.
+  final List<double>? skinColorLinear;
+  final List<double>? eyeColorLinear;
 }
 
 /// Updates one accepted model without decoding its GLB or replacing GPU meshes.
@@ -97,7 +120,12 @@ final class NativeRiggedModelProbeUpdate {
     this.playbackRate,
     this.opacity,
     this.opacityTransitionMilliseconds,
-  }) {
+    this.skinColor,
+    this.eyeColor,
+    List<double>? skinColorLinear,
+    List<double>? eyeColorLinear,
+  }) : skinColorLinear = _copyLinearColor(skinColorLinear),
+       eyeColorLinear = _copyLinearColor(eyeColorLinear) {
     if (!latitude.isFinite ||
         latitude.abs() > NativeCubeProbeOptions.mercatorLatitudeLimit) {
       throw ArgumentError.value(latitude, 'latitude', 'Outside Mercator range');
@@ -120,6 +148,8 @@ final class NativeRiggedModelProbeUpdate {
     if (rate != null && (!rate.isFinite || rate < 0 || rate > 4)) {
       throw ArgumentError.value(rate, 'playbackRate', 'Outside [0, 4]');
     }
+    if (skinColor != null) _validateColor(skinColor!);
+    if (eyeColor != null) _validateColor(eyeColor!);
     final alpha = opacity;
     if (alpha != null) _validateOpacity(alpha);
     final duration = opacityTransitionMilliseconds;
@@ -142,6 +172,36 @@ final class NativeRiggedModelProbeUpdate {
 
   /// A native-clock transition. Omission means an immediate opacity change.
   final int? opacityTransitionMilliseconds;
+
+  /// sRGB palette uniforms; omitted values preserve the current palette.
+  final String? skinColor;
+  final String? eyeColor;
+
+  /// Exact linear sRGB targets. Omission preserves the corresponding target.
+  final List<double>? skinColorLinear;
+  final List<double>? eyeColorLinear;
+}
+
+List<double>? _copyLinearColor(List<double>? color) {
+  if (color == null) return null;
+  if (color.length != 3 ||
+      color.any(
+        (component) =>
+            !component.isFinite || component < 0.001 || component > 1,
+      )) {
+    throw ArgumentError.value(
+      color,
+      'linearColor',
+      'Expected three finite linear sRGB components in [0.001, 1]',
+    );
+  }
+  return List<double>.unmodifiable(color);
+}
+
+void _validateColor(String color) {
+  if (!RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(color)) {
+    throw ArgumentError.value(color, 'color', 'Expected #RRGGBB');
+  }
 }
 
 void _validateOpacity(double opacity) {

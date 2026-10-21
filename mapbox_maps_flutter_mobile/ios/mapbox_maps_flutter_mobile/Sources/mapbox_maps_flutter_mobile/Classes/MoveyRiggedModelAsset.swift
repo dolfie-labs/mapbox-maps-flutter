@@ -22,6 +22,83 @@ final class MoveyGLBCancellation {
     }
 }
 
+enum MoveyCharacterPalette {
+    static let defaultSkin = "#FFD1B0"
+    static let defaultEye = "#874721"
+    static let customizerSkin = SIMD4<Float>(0.88792324, 0.38132605, 0.1559265, 1)
+    static let customizerEye = SIMD4<Float>(0.18, 0.055, 0.022, 1)
+    static func linearComponents(_ value: Any) -> SIMD4<Float>? {
+        guard let values = value as? [Any], values.count == 3 else { return nil }
+        var components: [Float] = []
+        for value in values {
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue >= 0.001, number.doubleValue <= 1 else { return nil }
+            components.append(number.floatValue)
+        }
+        return SIMD4(components[0], components[1], components[2], 1)
+    }
+    static func lipValue(skin: SIMD3<Float>) -> Float {
+        let weights = SIMD3<Float>(0.2126, 0.7152, 0.0722)
+        return min(1.2, max(0.2, sqrt(simd_dot(skin, weights) / simd_dot(SIMD3(customizerSkin.x, customizerSkin.y, customizerSkin.z), weights))))
+    }
+    static func hsv(_ rgb: SIMD3<Float>) -> SIMD3<Float> {
+        let maximum = max(rgb.x, max(rgb.y, rgb.z)), minimum = min(rgb.x, min(rgb.y, rgb.z))
+        let difference = maximum - minimum
+        guard difference > 0 else { return SIMD3(0, 0, maximum) }
+        var hue: Float
+        if maximum == rgb.x { hue = (rgb.y - rgb.z) / difference + (rgb.y < rgb.z ? 6 : 0) }
+        else if maximum == rgb.y { hue = (rgb.z - rgb.x) / difference + 2 }
+        else { hue = (rgb.x - rgb.y) / difference + 4 }
+        return SIMD3(hue / 6, maximum > 0 ? difference / maximum : 0, maximum)
+    }
+    static func rgb(_ hsv: SIMD3<Float>) -> SIMD3<Float> {
+        let hue = (hsv.x - floor(hsv.x)) * 6, sector = Int(floor(hue)), fraction = hue - floor(hue)
+        let p = hsv.z * (1 - hsv.y), q = hsv.z * (1 - hsv.y * fraction), t = hsv.z * (1 - hsv.y * (1 - fraction))
+        switch sector {
+        case 0: return SIMD3(hsv.z, t, p)
+        case 1: return SIMD3(q, hsv.z, p)
+        case 2: return SIMD3(p, hsv.z, t)
+        case 3: return SIMD3(p, q, hsv.z)
+        case 4: return SIMD3(t, p, hsv.z)
+        default: return SIMD3(hsv.z, p, q)
+        }
+    }
+    static func customizer(base: SIMD3<Float>, mask: SIMD3<Float>, skin: SIMD3<Float>, eye: SIMD3<Float>) -> SIMD3<Float> {
+        let referenceSkin = SIMD3(customizerSkin.x, customizerSkin.y, customizerSkin.z)
+        var result = base + (base * skin / referenceSkin - base) * mask.x
+        var adjusted = hsv(result)
+        let target = hsv(eye), reference = hsv(SIMD3(customizerEye.x, customizerEye.y, customizerEye.z))
+        adjusted.x += target.x - reference.x
+        adjusted.y = min(1, max(0, adjusted.y * target.y / reference.y))
+        adjusted.z *= min(1.4, max(0.25, target.z / reference.z))
+        result += (rgb(adjusted) - result) * mask.y
+        result *= 1 + mask.z * (lipValue(skin: skin) - 1)
+        return simd_max(result, SIMD3<Float>(repeating: 0))
+    }
+    static func linear(_ value: String) -> SIMD4<Float>? {
+        guard value.utf8.count == 7, value.first == "#", value.dropFirst().utf8.allSatisfy({ (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }),
+              let hex = UInt32(value.dropFirst(), radix: 16) else { return nil }
+        func component(_ shift: UInt32) -> Float {
+            let srgb = Float((hex >> shift) & 255) / 255
+            return srgb <= 0.04045 ? srgb / 12.92 : pow((srgb + 0.055) / 1.055, 2.4)
+        }
+        return SIMD4(component(16), component(8), component(0), 1)
+    }
+}
+
+enum MoveyTintMode: Int {
+    case legacy = 0, customizerHead = 1, customizerSkin = 2, customizerLips = 3
+    static func decode(_ value: Any?) throws -> Self {
+        guard let value else { return .legacy }
+        switch value as? String {
+        case "CUSTOMIZER_V5_HEAD": return .customizerHead
+        case "CUSTOMIZER_V5_SKIN": return .customizerSkin
+        case "CUSTOMIZER_V5_LIPS": return .customizerLips
+        default: throw MoveyGLBFailure.unsupported("Unknown character tint mode.")
+        }
+    }
+}
+
 struct MoveySkinVertex {
     let position: SIMD4<Float>
     let joints: SIMD4<UInt32>
@@ -41,7 +118,8 @@ struct MoveyRiggedTexture {
 
     /// ImageIO performs the actual decompression on the bounded CPU load queue.
     static func decode(_ encoded: Data, mimeType: String, magFilter: Int, minFilter: Int,
-                       wrapS: Int, wrapT: Int, cancellation: MoveyGLBCancellation) throws -> Self {
+                       wrapS: Int, wrapT: Int, cancellation: MoveyGLBCancellation,
+                       maximumPixels: Int = 4_194_304) throws -> Self {
         try cancellation.check()
         guard encoded.count <= 1_048_576 else { throw MoveyGLBFailure.unsupported("An embedded image must be at most 1 MiB.") }
         guard let source = CGImageSourceCreateWithData(encoded as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
@@ -54,6 +132,10 @@ struct MoveyRiggedTexture {
               width > 0, height > 0, width <= 2048, height <= 2048,
               width <= 4_194_304 / height else {
             throw MoveyGLBFailure.invalid("The embedded PNG/JPEG must contain one image no larger than 2048 by 2048 pixels.")
+        }
+        // Check the aggregate budget before allocating or decompressing RGBA.
+        guard width <= maximumPixels / height else {
+            throw MoveyGLBFailure.unsupported("Decoded character textures exceed the 16M-pixel aggregate limit.")
         }
         guard let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary),
               let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
@@ -97,6 +179,10 @@ struct MoveyRiggedAnimationClock {
         previous = now
     }
     mutating func reset() { time = 0; previous = nil }
+    mutating func retime(duration: Double) {
+        time = time.truncatingRemainder(dividingBy: duration)
+        previous = nil
+    }
     mutating func suspend() { previous = nil }
 }
 
@@ -187,6 +273,7 @@ struct MoveyRiggedPlacementTween {
 
 struct MoveyRiggedAsset {
     struct Node {
+        let name: String?
         let parent: Int?
         let matrix: simd_double4x4?
         let translation: SIMD3<Double>
@@ -214,10 +301,42 @@ struct MoveyRiggedAsset {
     let joints: [Int]
     let inverseBindMatrices: [simd_double4x4]
     let clips: [Clip]
-    let baseColor: SIMD4<Float>
-    let texture: MoveyRiggedTexture?
+    let skeletonFingerprint: String?
+    struct Part {
+        let firstIndex: Int
+        let indexCount: Int
+        let baseColor: SIMD4<Float>
+        let textureIndex: Int?
+        let tintMaskTextureIndex: Int?
+        let skin: Bool
+        let tintMode: MoveyTintMode
+    }
+    let parts: [Part]
+    let textures: [MoveyRiggedTexture]
+    var usesCustomizer: Bool { parts.contains { $0.tintMode != .legacy } }
+    var baseColor: SIMD4<Float> { parts[0].baseColor }
+    var texture: MoveyRiggedTexture? { parts[0].textureIndex.map { textures[$0] } }
     /// Converts world-space glTF Y-up to a grounded, unit-height E/S/Up model.
     let normalizedWorldToMap: simd_double4x4
+
+    /// Outfit replacement can retain phase only when its joint identities and
+    /// bind transforms describe the same shared rig. Counts alone are not proof.
+    func hasSameRig(as other: MoveyRiggedAsset) -> Bool {
+        guard joints.count == other.joints.count,
+              skeletonFingerprint == other.skeletonFingerprint else { return false }
+        let rest = Self.globals(nodes: nodes, traversal: traversal, clip: nil, time: 0)
+        let otherRest = Self.globals(nodes: other.nodes, traversal: other.traversal, clip: nil, time: 0)
+        func near(_ a: simd_double4x4, _ b: simd_double4x4) -> Bool {
+            (0..<4).allSatisfy { column in (0..<4).allSatisfy { abs(a[column][$0] - b[column][$0]) < 1e-6 } }
+        }
+        return joints.indices.allSatisfy { index in
+            let joint = joints[index], otherJoint = other.joints[index]
+            let parent = nodes[joint].parent.flatMap { joints.firstIndex(of: $0) }
+            let otherParent = other.nodes[otherJoint].parent.flatMap { other.joints.firstIndex(of: $0) }
+            return nodes[joint].name == other.nodes[otherJoint].name && parent == otherParent &&
+                near(rest[joint], otherRest[otherJoint]) && near(inverseBindMatrices[index], other.inverseBindMatrices[index])
+        }
+    }
 
     func pose(time: Double, clipIndex: Int) -> Pose? {
         let globals = Self.globals(nodes: nodes, traversal: traversal, clip: clips[clipIndex], time: time)
@@ -295,10 +414,10 @@ struct MoveyRiggedAsset {
 }
 
 enum MoveyGLBDecoder {
-    static let maximumBytes = 2 * 1024 * 1024
+    static let maximumBytes = 8 * 1024 * 1024
 
     static func decode(_ data: Data, cancellation: MoveyGLBCancellation) throws -> MoveyRiggedAsset {
-        if data.count > maximumBytes { throw MoveyGLBFailure(code: "GLB_TOO_LARGE", message: "A probe GLB must be at most 2 MiB.") }
+        if data.count > maximumBytes { throw MoveyGLBFailure(code: "GLB_TOO_LARGE", message: "A character GLB must be at most 8 MiB.") }
         try cancellation.check()
         guard data.count >= 20, uint32(data, 0) == 0x46546c67,
               uint32(data, 4) == 2, Int(uint32(data, 8)) == data.count else {
@@ -359,8 +478,8 @@ enum MoveyGLBDecoder {
             guard buffers.count == 1, buffers[0]["uri"] == nil else { throw MoveyGLBFailure.unsupported("Only one embedded GLB buffer is supported.") }
             let byteLength = try integer(buffers[0], "byteLength", minimum: 1, maximum: binary.count)
             guard binary.count - byteLength <= 3 else { throw MoveyGLBFailure.invalid("Binary chunk length does not match its buffer.") }
-            let views = try objects(root, "bufferViews", maximum: 256)
-            let accessors = try objects(root, "accessors", maximum: 256)
+            let views = try objects(root, "bufferViews", maximum: 1024)
+            let accessors = try objects(root, "accessors", maximum: 1024)
             let reader = AccessorReader(binary: binary, byteLength: byteLength, views: views, accessors: accessors)
             try reader.validateDefinitions()
             let rawNodes = try objects(root, "nodes", maximum: 128)
@@ -406,17 +525,21 @@ enum MoveyGLBDecoder {
                 guard parents[index] == nil, !sceneNodes.contains(index) else { throw MoveyGLBFailure.invalid("Scene roots must be unique hierarchy roots.") }
                 include(index)
             }
-            let meshes = try objects(root, "meshes", maximum: 1)
+            let meshes = try objects(root, "meshes", maximum: 8)
             let skins = try objects(root, "skins", maximum: 1)
-            guard meshes.count == 1, skins.count == 1 else { throw MoveyGLBFailure.unsupported("The probe requires exactly one mesh and one skin.") }
             let meshNodes = rawNodes.indices.filter { rawNodes[$0]["mesh"] != nil }
-            guard meshNodes.count == 1, let meshNode = meshNodes.first, sceneNodes.contains(meshNode),
-                  try integer(rawNodes[meshNode], "mesh", minimum: 0, maximum: 0) == 0,
-                  try integer(rawNodes[meshNode], "skin", minimum: 0, maximum: 0) == 0 else {
-                throw MoveyGLBFailure.unsupported("The mesh must have a single skinned scene instance.")
+            guard !meshes.isEmpty, skins.count == 1, !meshNodes.isEmpty, meshNodes.count <= 8 else {
+                throw MoveyGLBFailure.unsupported("A character requires 1 to 8 mesh nodes and one shared skin.")
             }
-            for index in rawNodes.indices where index != meshNode && rawNodes[index]["skin"] != nil {
-                throw MoveyGLBFailure.unsupported("Additional skin instances are unsupported.")
+            for index in meshNodes {
+                guard sceneNodes.contains(index),
+                      try integer(rawNodes[index], "mesh", minimum: 0, maximum: meshes.count - 1) >= 0,
+                      try integer(rawNodes[index], "skin", minimum: 0, maximum: 0) == 0 else {
+                    throw MoveyGLBFailure.unsupported("Every mesh must use the shared skin in the selected scene.")
+                }
+            }
+            for index in rawNodes.indices where rawNodes[index]["mesh"] == nil && rawNodes[index]["skin"] != nil {
+                throw MoveyGLBFailure.unsupported("A skin instance requires a mesh.")
             }
             let nodes = try rawNodes.enumerated().map { index, raw -> MoveyRiggedAsset.Node in
                 let translation = try vector(raw, "translation", count: 3, fallback: [0, 0, 0])
@@ -429,12 +552,12 @@ enum MoveyGLBDecoder {
                     guard raw["translation"] == nil, raw["rotation"] == nil, raw["scale"] == nil else { throw MoveyGLBFailure.invalid("A node cannot contain both matrix and TRS.") }
                     matrix = try matrixValue(vector(raw, "matrix", count: 16, fallback: []))
                 }
-                return .init(parent: parents[index], matrix: matrix,
+                return .init(name: raw["name"] as? String, parent: parents[index], matrix: matrix,
                              translation: SIMD3(translation[0], translation[1], translation[2]),
                              rotation: simd_normalize(q), scale: SIMD3(scale[0], scale[1], scale[2]))
             }
-            guard let jointValues = skins[0]["joints"] as? [Any], !jointValues.isEmpty, jointValues.count <= 32 else {
-                throw MoveyGLBFailure.unsupported("The skin must contain 1 to 32 joints.")
+            guard let jointValues = skins[0]["joints"] as? [Any], !jointValues.isEmpty, jointValues.count <= 64 else {
+                throw MoveyGLBFailure.unsupported("The skin must contain 1 to 64 joints.")
             }
             let joints = try jointValues.map { try integerValue($0, minimum: 0, maximum: nodes.count - 1) }
             guard Set(joints).count == joints.count, joints.allSatisfy(sceneNodes.contains) else { throw MoveyGLBFailure.invalid("Skin joints must be unique nodes in the selected scene.") }
@@ -451,94 +574,135 @@ enum MoveyGLBDecoder {
             } else {
                 inverseBindMatrices = Array(repeating: matrix_identity_double4x4, count: joints.count)
             }
-            guard meshes[0]["weights"] == nil, meshes[0]["extensions"] == nil else { throw MoveyGLBFailure.unsupported("Morph weights and mesh extensions are unsupported.") }
-            let primitives = try objects(meshes[0], "primitives", maximum: 1)
-            guard primitives.count == 1 else { throw MoveyGLBFailure.unsupported("The probe requires one mesh primitive.") }
-            let primitive = primitives[0]
-            guard try optionalInteger(primitive, "mode", fallback: 4, minimum: 0, maximum: 6) == 4,
-                  primitive["targets"] == nil, primitive["extensions"] == nil else { throw MoveyGLBFailure.unsupported("Only TRIANGLES without morph targets or extensions are supported.") }
-            guard let attributes = primitive["attributes"] as? [String: Any],
-                  Set(attributes.keys).isSubset(of: ["POSITION", "NORMAL", "TEXCOORD_0", "JOINTS_0", "WEIGHTS_0"]) else {
-                throw MoveyGLBFailure.unsupported("The probe supports only position, normal, and one set of skin attributes.")
+            let materials = try optionalObjects(root, "materials", maximum: 16)
+            let textureDefinitions = try optionalObjects(root, "textures", maximum: 16)
+            let images = try optionalObjects(root, "images", maximum: 16)
+            let samplers = try optionalObjects(root, "samplers", maximum: 16)
+            var textures: [MoveyRiggedTexture] = []
+            var textureMapping: [Int: Int] = [:]
+            var decodedTexturePixels = 0
+            func textureIndex(_ index: Int) throws -> Int {
+                if let existing = textureMapping[index] { return existing }
+                let description = textureDefinitions[index]
+                guard description["extensions"] == nil else { throw MoveyGLBFailure.unsupported("Texture extensions are unsupported.") }
+                let image = images[try integer(description, "source", minimum: 0, maximum: images.count - 1)]
+                guard image["uri"] == nil, image["extensions"] == nil,
+                      let mime = image["mimeType"] as? String, ["image/png", "image/jpeg"].contains(mime) else {
+                    throw MoveyGLBFailure.unsupported("Only PNG/JPEG images embedded in a bufferView are supported.")
+                }
+                let view = views[try integer(image, "bufferView", minimum: 0, maximum: views.count - 1)]
+                let start = try optionalInteger(view, "byteOffset", fallback: 0, minimum: 0, maximum: byteLength)
+                let length = try integer(view, "byteLength", minimum: 1, maximum: byteLength - start)
+                var sampler: [String: Any] = [:]
+                if description["sampler"] != nil { sampler = samplers[try integer(description, "sampler", minimum: 0, maximum: samplers.count - 1)] }
+                let mag = try optionalInteger(sampler, "magFilter", fallback: 9729, minimum: 9728, maximum: 9729)
+                let min = try optionalInteger(sampler, "minFilter", fallback: 9987, minimum: 9728, maximum: 9987)
+                let wrapS = try optionalInteger(sampler, "wrapS", fallback: 10497, minimum: 0, maximum: 33648)
+                let wrapT = try optionalInteger(sampler, "wrapT", fallback: 10497, minimum: 0, maximum: 33648)
+                guard sampler["extensions"] == nil, [9728, 9729, 9984, 9985, 9986, 9987].contains(min),
+                      [33071, 33648, 10497].contains(wrapS), [33071, 33648, 10497].contains(wrapT) else {
+                    throw MoveyGLBFailure.unsupported("Unsupported texture sampling parameters.")
+                }
+                let decoded = try MoveyRiggedTexture.decode(binary.subdata(in: start..<(start + length)), mimeType: mime,
+                    magFilter: mag, minFilter: min, wrapS: wrapS, wrapT: wrapT, cancellation: cancellation,
+                    maximumPixels: 16_777_216 - decodedTexturePixels)
+                decodedTexturePixels += decoded.width * decoded.height
+                let mapped = textures.count
+                textures.append(decoded)
+                textureMapping[index] = mapped
+                return mapped
             }
-            let positionIndex = try integer(attributes, "POSITION", minimum: 0, maximum: accessors.count - 1)
-            let positions = try reader.floats(positionIndex, type: "VEC3")
-            let vertexCount = positions.count / 3
-            guard vertexCount > 0, vertexCount <= 65536 else { throw MoveyGLBFailure.unsupported("The vertex count exceeds the probe limit.") }
-            let weights = try reader.floats(integer(attributes, "WEIGHTS_0", minimum: 0, maximum: accessors.count - 1), type: "VEC4", count: vertexCount)
-            let jointIndices = try reader.unsigned(integer(attributes, "JOINTS_0", minimum: 0, maximum: accessors.count - 1), type: "VEC4", joints: true, count: vertexCount)
-            let uv: [Double]
-            if attributes["TEXCOORD_0"] != nil {
-                uv = try reader.floats(integer(attributes, "TEXCOORD_0", minimum: 0, maximum: accessors.count - 1), type: "VEC2", count: vertexCount)
-            } else { uv = Array(repeating: 0, count: vertexCount * 2) }
-            if attributes["NORMAL"] != nil { _ = try reader.floats(integer(attributes, "NORMAL", minimum: 0, maximum: accessors.count - 1), type: "VEC3", count: vertexCount) }
             var vertices: [MoveySkinVertex] = []
-            vertices.reserveCapacity(vertexCount)
-            for index in 0..<vertexCount {
-                if index % 256 == 0 { try cancellation.check() }
-                let start = index * 4
-                let weight = SIMD4(weights[start], weights[start + 1], weights[start + 2], weights[start + 3])
-                let sum = weight.x + weight.y + weight.z + weight.w
-                guard weight.x >= 0, weight.y >= 0, weight.z >= 0, weight.w >= 0,
-                      sum > 1e-8, abs(sum - 1) <= 0.02,
-                      (start..<(start + 4)).allSatisfy({ jointIndices[$0] < joints.count }) else {
-                    throw MoveyGLBFailure.invalid("Skin weights or joint indices are invalid.")
-                }
-                vertices.append(.init(position: SIMD4(Float(positions[index * 3]), Float(positions[index * 3 + 1]), Float(positions[index * 3 + 2]), 1),
-                                      joints: SIMD4(jointIndices[start], jointIndices[start + 1], jointIndices[start + 2], jointIndices[start + 3]),
-                                      weights: SIMD4<Float>(weight / sum), texCoord: SIMD2(Float(uv[index * 2]), Float(uv[index * 2 + 1]))))
-            }
-            let indices: [UInt32]
-            if primitive["indices"] != nil {
-                indices = try reader.unsigned(integer(primitive, "indices", minimum: 0, maximum: accessors.count - 1), type: "SCALAR", joints: false)
-            } else { indices = (0..<vertexCount).map(UInt32.init) }
-            guard !indices.isEmpty, indices.count <= 196608, indices.count % 3 == 0,
-                  indices.allSatisfy({ $0 < vertexCount }) else { throw MoveyGLBFailure.invalid("Triangle indices are out of bounds or incomplete.") }
-            let materials = try optionalObjects(root, "materials", maximum: 1)
-            var color = [1.0, 1.0, 1.0, 1.0]
-            var texture: MoveyRiggedTexture?
-            let textures = try optionalObjects(root, "textures", maximum: 1)
-            let images = try optionalObjects(root, "images", maximum: 1)
-            let samplers = try optionalObjects(root, "samplers", maximum: 1)
-            if primitive["material"] != nil {
-                let materialIndex = try integer(primitive, "material", minimum: 0, maximum: materials.count - 1)
-                let material = materials[materialIndex]
-                guard material["extensions"] == nil, material["normalTexture"] == nil, material["occlusionTexture"] == nil,
-                      material["emissiveTexture"] == nil, (material["alphaMode"] as? String ?? "OPAQUE") == "OPAQUE" else {
-                    throw MoveyGLBFailure.unsupported("Only opaque base-color materials are supported.")
-                }
-                if let pbr = material["pbrMetallicRoughness"] as? [String: Any] {
-                    guard pbr["metallicRoughnessTexture"] == nil else { throw MoveyGLBFailure.unsupported("Only an embedded base-color texture is supported.") }
-                    color = try vector(pbr, "baseColorFactor", count: 4, fallback: color)
-                    if let info = pbr["baseColorTexture"] as? [String: Any] {
-                        guard info["extensions"] == nil,
-                              try optionalInteger(info, "texCoord", fallback: 0, minimum: 0, maximum: 0) == 0,
-                              attributes["TEXCOORD_0"] != nil else { throw MoveyGLBFailure.unsupported("A base-color texture requires TEXCOORD_0 without texture extensions.") }
-                        let description = textures[try integer(info, "index", minimum: 0, maximum: textures.count - 1)]
-                        guard description["extensions"] == nil else { throw MoveyGLBFailure.unsupported("Texture extensions are unsupported.") }
-                        let image = images[try integer(description, "source", minimum: 0, maximum: images.count - 1)]
-                        guard image["uri"] == nil, image["extensions"] == nil,
-                              let mime = image["mimeType"] as? String, ["image/png", "image/jpeg"].contains(mime) else {
-                            throw MoveyGLBFailure.unsupported("Only PNG/JPEG images embedded in a bufferView are supported.")
+            var indices: [UInt32] = []
+            var parts: [MoveyRiggedAsset.Part] = []
+            for meshNode in meshNodes {
+                let mesh = meshes[try integer(rawNodes[meshNode], "mesh", minimum: 0, maximum: meshes.count - 1)]
+                guard mesh["weights"] == nil, mesh["extensions"] == nil else { throw MoveyGLBFailure.unsupported("Morph weights and mesh extensions are unsupported.") }
+                let primitives = try objects(mesh, "primitives", maximum: 16)
+                guard !primitives.isEmpty, parts.count + primitives.count <= 16 else { throw MoveyGLBFailure.unsupported("A character supports 1 to 16 total primitives.") }
+                for primitive in primitives {
+                    try cancellation.check()
+                    guard try optionalInteger(primitive, "mode", fallback: 4, minimum: 0, maximum: 6) == 4,
+                          primitive["targets"] == nil, primitive["extensions"] == nil else { throw MoveyGLBFailure.unsupported("Only TRIANGLES without morph targets or extensions are supported.") }
+                    guard let attributes = primitive["attributes"] as? [String: Any],
+                          Set(attributes.keys).isSubset(of: ["POSITION", "NORMAL", "TEXCOORD_0", "JOINTS_0", "WEIGHTS_0"]) else {
+                        throw MoveyGLBFailure.unsupported("Only position, normal, UV and one set of skin attributes are supported.")
+                    }
+                    let positionIndex = try integer(attributes, "POSITION", minimum: 0, maximum: accessors.count - 1)
+                    let positions = try reader.floats(positionIndex, type: "VEC3")
+                    let vertexCount = positions.count / 3
+                    guard vertexCount > 0, vertices.count + vertexCount <= 65536 else { throw MoveyGLBFailure.unsupported("The total vertex count exceeds 65536.") }
+                    let weights = try reader.floats(integer(attributes, "WEIGHTS_0", minimum: 0, maximum: accessors.count - 1), type: "VEC4", count: vertexCount)
+                    let jointIndices = try reader.unsigned(integer(attributes, "JOINTS_0", minimum: 0, maximum: accessors.count - 1), type: "VEC4", joints: true, count: vertexCount)
+                    let uv: [Double]
+                    if attributes["TEXCOORD_0"] != nil {
+                        uv = try reader.floats(integer(attributes, "TEXCOORD_0", minimum: 0, maximum: accessors.count - 1), type: "VEC2", count: vertexCount)
+                    } else { uv = Array(repeating: 0, count: vertexCount * 2) }
+                    if attributes["NORMAL"] != nil { _ = try reader.floats(integer(attributes, "NORMAL", minimum: 0, maximum: accessors.count - 1), type: "VEC3", count: vertexCount) }
+                    let firstVertex = vertices.count
+                    for index in 0..<vertexCount {
+                        if index % 256 == 0 { try cancellation.check() }
+                        let start = index * 4
+                        let weight = SIMD4(weights[start], weights[start + 1], weights[start + 2], weights[start + 3])
+                        let sum = weight.x + weight.y + weight.z + weight.w
+                        guard weight.x >= 0, weight.y >= 0, weight.z >= 0, weight.w >= 0,
+                              sum > 1e-8, abs(sum - 1) <= 0.02,
+                              (start..<(start + 4)).allSatisfy({ jointIndices[$0] < joints.count }) else {
+                            throw MoveyGLBFailure.invalid("Skin weights or joint indices are invalid.")
                         }
-                        let view = views[try integer(image, "bufferView", minimum: 0, maximum: views.count - 1)]
-                        let start = try optionalInteger(view, "byteOffset", fallback: 0, minimum: 0, maximum: byteLength)
-                        let length = try integer(view, "byteLength", minimum: 1, maximum: byteLength - start)
-                        var sampler: [String: Any] = [:]
-                        if description["sampler"] != nil { sampler = samplers[try integer(description, "sampler", minimum: 0, maximum: samplers.count - 1)] }
-                        let mag = try optionalInteger(sampler, "magFilter", fallback: 9729, minimum: 9728, maximum: 9729)
-                        let min = try optionalInteger(sampler, "minFilter", fallback: 9987, minimum: 9728, maximum: 9987)
-                        let wrapS = try optionalInteger(sampler, "wrapS", fallback: 10497, minimum: 0, maximum: 33648)
-                        let wrapT = try optionalInteger(sampler, "wrapT", fallback: 10497, minimum: 0, maximum: 33648)
-                        guard sampler["extensions"] == nil, [9728, 9729, 9984, 9985, 9986, 9987].contains(min),
-                              [33071, 33648, 10497].contains(wrapS), [33071, 33648, 10497].contains(wrapT) else {
-                            throw MoveyGLBFailure.unsupported("Unsupported texture sampling parameters.")
+                        vertices.append(.init(position: SIMD4(Float(positions[index * 3]), Float(positions[index * 3 + 1]), Float(positions[index * 3 + 2]), 1),
+                            joints: SIMD4(jointIndices[start], jointIndices[start + 1], jointIndices[start + 2], jointIndices[start + 3]),
+                            weights: SIMD4<Float>(weight / sum), texCoord: SIMD2(Float(uv[index * 2]), Float(uv[index * 2 + 1]))))
+                    }
+                    let localIndices: [UInt32]
+                    if primitive["indices"] != nil {
+                        localIndices = try reader.unsigned(integer(primitive, "indices", minimum: 0, maximum: accessors.count - 1), type: "SCALAR", joints: false)
+                    } else { localIndices = (0..<vertexCount).map(UInt32.init) }
+                    guard !localIndices.isEmpty, indices.count + localIndices.count <= 196608, localIndices.count % 3 == 0,
+                          localIndices.allSatisfy({ $0 < vertexCount }) else { throw MoveyGLBFailure.invalid("Triangle indices are out of bounds, incomplete or exceed 196608.") }
+                    let firstIndex = indices.count
+                    indices.append(contentsOf: localIndices.map { $0 + UInt32(firstVertex) })
+                    var color = [1.0, 1.0, 1.0, 1.0]
+                    var baseTextureIndex: Int?
+                    var maskTextureIndex: Int?
+                    var skin = false
+                    var tintMode = MoveyTintMode.legacy
+                    if primitive["material"] != nil {
+                        let material = materials[try integer(primitive, "material", minimum: 0, maximum: materials.count - 1)]
+                        guard material["extensions"] == nil, material["normalTexture"] == nil, material["occlusionTexture"] == nil,
+                              material["emissiveTexture"] == nil, (material["alphaMode"] as? String ?? "OPAQUE") == "OPAQUE" else {
+                            throw MoveyGLBFailure.unsupported("Only opaque base-color materials are supported.")
                         }
-                        texture = try MoveyRiggedTexture.decode(binary.subdata(in: start..<(start + length)), mimeType: mime,
-                                                                magFilter: mag, minFilter: min, wrapS: wrapS, wrapT: wrapT, cancellation: cancellation)
-                    } else if pbr["baseColorTexture"] != nil { throw MoveyGLBFailure.invalid("Invalid base-color texture description.") }
+                        if let pbr = material["pbrMetallicRoughness"] as? [String: Any] {
+                            guard pbr["metallicRoughnessTexture"] == nil else { throw MoveyGLBFailure.unsupported("Only an embedded base-color texture is supported.") }
+                            color = try vector(pbr, "baseColorFactor", count: 4, fallback: color)
+                            if let info = pbr["baseColorTexture"] as? [String: Any] {
+                                guard info["extensions"] == nil,
+                                      try optionalInteger(info, "texCoord", fallback: 0, minimum: 0, maximum: 0) == 0,
+                                      attributes["TEXCOORD_0"] != nil else { throw MoveyGLBFailure.unsupported("A base-color texture requires TEXCOORD_0 without texture extensions.") }
+                                baseTextureIndex = try textureIndex(integer(info, "index", minimum: 0, maximum: textureDefinitions.count - 1))
+                            } else if pbr["baseColorTexture"] != nil { throw MoveyGLBFailure.invalid("Invalid base-color texture description.") }
+                        }
+                        if let extras = material["extras"] as? [String: Any] {
+                            tintMode = try MoveyTintMode.decode(extras["moveyTintMode"])
+                            if let value = extras["moveySkin"] {
+                                guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { throw MoveyGLBFailure.invalid("moveySkin must be a boolean.") }
+                                skin = number.boolValue
+                            }
+                            if extras["moveyTintMaskTexture"] != nil {
+                                guard attributes["TEXCOORD_0"] != nil else { throw MoveyGLBFailure.invalid("A tint mask requires TEXCOORD_0.") }
+                                maskTextureIndex = try textureIndex(integer(extras, "moveyTintMaskTexture", minimum: 0, maximum: textureDefinitions.count - 1))
+                            }
+                        }
+                        guard color.allSatisfy({ $0 >= 0 && $0 <= 1 }) else { throw MoveyGLBFailure.invalid("Material base color must be in [0, 1].") }
+                    }
+                    guard tintMode != .customizerHead || maskTextureIndex != nil else {
+                        throw MoveyGLBFailure.invalid("Customizer head tint requires the authored RGB mask.")
+                    }
+                    parts.append(.init(firstIndex: firstIndex, indexCount: localIndices.count,
+                        baseColor: SIMD4(Float(color[0]), Float(color[1]), Float(color[2]), Float(color[3])),
+                        textureIndex: baseTextureIndex, tintMaskTextureIndex: maskTextureIndex, skin: skin, tintMode: tintMode))
                 }
-                guard color.allSatisfy({ $0 >= 0 && $0 <= 1 }) else { throw MoveyGLBFailure.invalid("Material base color must be in [0, 1].") }
             }
             let animations = try objects(root, "animations", maximum: 8)
             guard !animations.isEmpty else { throw MoveyGLBFailure.unsupported("The rigged probe requires an animation clip.") }
@@ -571,7 +735,7 @@ enum MoveyGLBDecoder {
                     // Reused accessors can otherwise expand a tiny GLB into a
                     // large decoded clip graph across many channels/clips.
                     animationScalarBudget += times.count * (width + 1)
-                    guard animationScalarBudget <= 65536 else {
+                    guard animationScalarBudget <= 2_000_000 else {
                         throw MoveyGLBFailure.unsupported("Decoded animation samples exceed the probe limit.")
                     }
                     let rawValues = try reader.floats(integer(sampler, "output", minimum: 0, maximum: accessors.count - 1), type: width == 4 ? "VEC4" : "VEC3", count: times.count)
@@ -612,8 +776,8 @@ enum MoveyGLBDecoder {
             try cancellation.check()
             return MoveyRiggedAsset(vertices: vertices, indices: indices, nodes: nodes, traversal: traversal,
                                     joints: joints, inverseBindMatrices: inverseBindMatrices, clips: clips,
-                                    baseColor: SIMD4(Float(color[0]), Float(color[1]), Float(color[2]), Float(color[3])),
-                                    texture: texture,
+                                    skeletonFingerprint: (root["extras"] as? [String: Any])?["moveySkeletonFingerprint"] as? String,
+                                    parts: parts, textures: textures,
                                     normalizedWorldToMap: yUpToMap * normalized)
         }
 

@@ -1,0 +1,20 @@
+{
+  "name": "Movey V5 assembled wardrobe integration fixture",
+  "source": "User-owned movey-character-3d/export/mobile-v5 parts, composed by movey-base-app/lib/core/character/rendering/character_model_assembler.dart",
+  "sha256": "b09b4d23c6579c52ae40e0f0b957255defe47ed484e6ef085c968c730c46455e",
+  "bytes": 3818148,
+  "bodyVersion": "movey_base_body_v5",
+  "skeletonFingerprint": "a6babfd826ad921b9978984ac8250f59b7126bbcbe3ab087d5b1e21716b9527a",
+  "meshParts": 9,
+  "flattenedVertices": 34392,
+  "joints": 57,
+  "clips": 3,
+  "verification": "Local native CPU and Android read-only emulator integration checks; no physical-device or performance claim.",
+  "tintModes": [
+    "CUSTOMIZER_V5_HEAD",
+    "CUSTOMIZER_V5_LIPS",
+    "CUSTOMIZER_V5_SKIN"
+  ],
+  "paletteColorSpace": "LINEAR_SRGB",
+  "referenceProbes": "tool/animated_entities/fixtures/customizer-tint-cases.json"
+}

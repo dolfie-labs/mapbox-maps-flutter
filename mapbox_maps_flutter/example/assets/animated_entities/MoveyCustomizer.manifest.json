@@ -1,0 +1,33 @@
+{
+  "purpose": "Native unlit runtime tint comparison with Blender-baked Original/Brown and Tan/Blue at identical camera and paused pose. Baked JPEG/resampling differs from original-atlas runtime sampling; pixel-perfect whole-scene equality is not claimed.",
+  "colorSpace": "LINEAR_SRGB",
+  "fixtures": [
+    {
+      "file": "MoveyCustomizerDynamic.glb",
+      "source": "Production CharacterModelAssembler with all starter002 parts and exact Customizer runtime base",
+      "bytes": 3866992,
+      "sha256": "2598e4f0fc56322b87df4c2eaca49789b4a91b083910f8ba248522666b514ebb",
+      "meshParts": 9,
+      "joints": 57,
+      "clips": 3
+    },
+    {
+      "file": "MoveyCustomizerBakedOriginal.glb",
+      "source": "movey-character-3d/export/customizer-v5/movey-customizer-v5.glb",
+      "bytes": 3284000,
+      "sha256": "004034d48a735c5e2b5149d4d22c2e157e15503f96ace42d9053d1375b108f4a",
+      "meshParts": 9,
+      "joints": 57,
+      "clips": 3
+    },
+    {
+      "file": "MoveyCustomizerBakedTanBlue.glb",
+      "source": "movey-character-3d/export/customizer-v5/movey-tan-blue-v5.glb",
+      "bytes": 3207240,
+      "sha256": "178a53d281796b2f38f479ab269ff94c26d3b0b8d458885ae6401273df247b60",
+      "meshParts": 9,
+      "joints": 57,
+      "clips": 3
+    }
+  ]
+}
