@@ -10,7 +10,7 @@ import UIKit
 /// One map-scoped P0 native probe, with additive cube and bounded GLB commands.
 final class MoveyAnimatedEntitiesHost: NSObject {
     private static let protocolVersion = 1
-    private static let layerId = "movey-animated-entities-p0-cube-v1"
+    private let layerId: String
     private static let mercatorLatitudeLimit = 85.05112878
     private weak var mapView: MapView?
     private let channel: FlutterMethodChannel
@@ -35,9 +35,10 @@ final class MoveyAnimatedEntitiesHost: NSObject {
     private var disposed = false
     private var rotationDegreesPerSecond = 0.0
 
-    init(mapView: MapView, messenger: FlutterBinaryMessenger, channelSuffix: String) {
+    init(mapView: MapView, messenger: FlutterBinaryMessenger, channelSuffix: String, companion: Bool = false) {
+        self.layerId = companion ? "movey-following-pet-v1" : "movey-animated-entities-p0-cube-v1"
         self.mapView = mapView
-        channel = FlutterMethodChannel(name: "dev.movey.mapbox.animated_entities.v1.\(channelSuffix)", binaryMessenger: messenger)
+        channel = FlutterMethodChannel(name: "dev.movey.mapbox.animated_entities.v1.\(channelSuffix)\(companion ? ".companion" : "")", binaryMessenger: messenger)
         super.init()
         channel.setMethodCallHandler { [weak self] call, result in
             guard let self else { result(FlutterError(code: "MAP_DISPOSED", message: "The map has been disposed.", details: nil)); return }
@@ -186,7 +187,7 @@ final class MoveyAnimatedEntitiesHost: NSObject {
         case "getDiagnostics":
             let state = renderer.diagnostics()
             result(["protocolVersion": Self.protocolVersion, "backend": "iosMetal", "attached": attached && !activeRigged,
-                    "paused": requestedPaused, "styleLayerPresent": ownsLayer && mapView?.mapboxMap.layerExists(withId: Self.layerId) == true,
+                    "paused": requestedPaused, "styleLayerPresent": ownsLayer && mapView?.mapboxMap.layerExists(withId: layerId) == true,
                     "initialized": !activeRigged && state.initialized, "repaintEnabled": !activeRigged && displayLink != nil,
                     "renderedFrames": state.renderedFrames, "lastErrorCode": state.lastErrorCode.map { $0 as Any } ?? NSNull(),
                     "supportsSkeletalAnimation": false])
@@ -319,7 +320,7 @@ final class MoveyAnimatedEntitiesHost: NSObject {
     }
     private func installLayerIfReady() -> FlutterError? {
         guard attached, let map = mapView?.mapboxMap, map.isStyleLoaded else { return nil }
-        if map.layerExists(withId: Self.layerId) {
+        if map.layerExists(withId: layerId) {
             guard ownsLayer else {
                 recordActiveError("STYLE_LAYER_ID_CONFLICT")
                 stopRepaint()
@@ -330,7 +331,7 @@ final class MoveyAnimatedEntitiesHost: NSObject {
         ownsLayer = false
         do {
             let layerRenderer: CustomLayerHost = activeRigged ? riggedRenderer : renderer
-            try map.addLayer(CustomLayer(id: Self.layerId, renderer: layerRenderer))
+            try map.addLayer(CustomLayer(id: layerId, renderer: layerRenderer))
             ownsLayer = true
             return nil
         } catch {
@@ -341,8 +342,8 @@ final class MoveyAnimatedEntitiesHost: NSObject {
     }
     @discardableResult private func removeLayer() -> FlutterError? {
         guard ownsLayer else { return nil }
-        guard let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId) else { ownsLayer = false; return nil }
-        do { try map.removeLayer(withId: Self.layerId); ownsLayer = false; return nil }
+        guard let map = mapView?.mapboxMap, map.layerExists(withId: layerId) else { ownsLayer = false; return nil }
+        do { try map.removeLayer(withId: layerId); ownsLayer = false; return nil }
         catch { recordActiveError("STYLE_LAYER_REMOVE_FAILED"); return self.error("STYLE_LAYER_REMOVE_FAILED", "The native custom layer could not be removed.") }
     }
     private func syncRepaint() {
@@ -350,7 +351,7 @@ final class MoveyAnimatedEntitiesHost: NSObject {
         riggedRenderer.setForeground(foreground)
         riggedRenderer.setPaused(requestedPaused || !foreground)
         guard !disposed, attached, foreground, ownsLayer,
-              let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId), activeError == nil else { stopRepaint(); return }
+              let map = mapView?.mapboxMap, map.layerExists(withId: layerId), activeError == nil else { stopRepaint(); return }
         map.triggerRepaint()
         let advances = activeRigged ? riggedRenderer.needsRepaint
                                     : (!requestedPaused && rotationDegreesPerSecond != 0)
@@ -365,7 +366,7 @@ final class MoveyAnimatedEntitiesHost: NSObject {
     }
     fileprivate func repaint() {
         guard !disposed, attached, foreground, ownsLayer,
-              let map = mapView?.mapboxMap, map.layerExists(withId: Self.layerId), activeError == nil else { stopRepaint(); return }
+              let map = mapView?.mapboxMap, map.layerExists(withId: layerId), activeError == nil else { stopRepaint(); return }
         // Trigger the endpoint frame before stopping a paused placement tween.
         map.triggerRepaint()
         let advances = activeRigged ? riggedRenderer.needsRepaint

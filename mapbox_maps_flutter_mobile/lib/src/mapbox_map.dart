@@ -5,7 +5,8 @@ class MapboxMap extends ChangeNotifier
     implements
         MapboxMapPlatformInterface,
         NativeCustomLayerProbeProvider,
-        NativeRiggedModelProbeProvider {
+        NativeRiggedModelProbeProvider,
+        NativeCompanionModelProvider {
   MapboxMap._({required _MapboxMapsPlatform mapboxMapsPlatform})
     : _mapboxMapsPlatform = mapboxMapsPlatform {
     annotations = AnnotationManager._(mapboxMapsPlatform: _mapboxMapsPlatform);
@@ -41,6 +42,17 @@ class MapboxMap extends ChangeNotifier
   @override
   NativeRiggedModelProbePlatformInterface get nativeRiggedModelProbe =>
       _nativeRiggedModelProbe;
+
+  late final _companionChannel = _NativeCustomLayerProbeChannel(
+    channelSuffix: _mapboxMapsPlatform.channelSuffix,
+    binaryMessenger: _mapboxMapsPlatform.binaryMessenger,
+    actorSuffix: '.companion',
+  );
+  late final _companion = _NativeRiggedModelProbeChannel(_companionChannel);
+
+  @override
+  NativeRiggedModelProbePlatformInterface get nativeCompanionModel =>
+      _companion;
 
   /// The currently loaded StyleManager object.
   @override
@@ -165,6 +177,7 @@ class MapboxMap extends ChangeNotifier
   @override
   void dispose() {
     _nativeCustomLayerProbe.dispose();
+    _companionChannel.dispose();
     _mapboxMapsPlatform.dispose();
     _PerformanceStatisticsListenerApi.setUp(
       null,

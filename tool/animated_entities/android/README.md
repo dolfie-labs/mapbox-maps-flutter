@@ -1,5 +1,11 @@
 # Android Customizer CPU checks
 
+`PlacementChecks.kt` compiles with production `RiggedPlacement.kt` using the same
+Kotlin/JVM toolchain, without Android dependencies. Run
+`com.mapbox.maps.mapbox_maps.PlacementChecksKt` to check eased 180-degree turns,
+unchanged-heading GPS updates, retarget continuity and dateline/heading short
+arcs. Position remains 500ms; heading has a separate 500ms–1.5s eased clock.
+
 `CustomizerTintChecks.kt` compares the production `RiggedCustomizerTint.kt`
 implementation with the 13 independent Cycles emission probes in
 `../fixtures/customizer-tint-cases.json`. It needs Kotlin/JVM, JDK 17 and

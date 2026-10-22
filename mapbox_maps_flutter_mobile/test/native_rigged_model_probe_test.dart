@@ -63,6 +63,43 @@ void main() {
   });
 
   test(
+    'companion commands and disposal are isolated from the primary actor',
+    () async {
+      const companionChannel = MethodChannel(
+        'dev.movey.mapbox.animated_entities.v1.61.companion',
+      );
+      final companionCalls = <MethodCall>[];
+      messenger.setMockMethodCallHandler(companionChannel, (call) async {
+        companionCalls.add(call);
+        return call.method == 'getRiggedModelDiagnostics' ? response : null;
+      });
+      try {
+        final options = NativeRiggedModelProbeOptions(
+          glbBytes: _header(),
+          latitude: 10,
+          longitude: 106,
+        );
+        await map.nativeRiggedModelProbe.attachRiggedModel(options);
+        await map.nativeCompanionModel.attachRiggedModel(options);
+        await map.nativeCompanionModel.setPaused(true);
+        await map.nativeCompanionModel.detach();
+        expect(calls.map((c) => c.method), ['attachRiggedModel']);
+        expect(companionCalls.map((c) => c.method), [
+          'attachRiggedModel',
+          'setPaused',
+          'detach',
+        ]);
+        final companion = map.nativeCompanionModel;
+        map.dispose();
+        disposed = true;
+        await expectLater(companion.setPaused(false), throwsStateError);
+      } finally {
+        messenger.setMockMethodCallHandler(companionChannel, null);
+      }
+    },
+  );
+
+  test(
     'sends copied bytes and exact options on the map-scoped shared channel',
     () async {
       final options = NativeRiggedModelProbeOptions(

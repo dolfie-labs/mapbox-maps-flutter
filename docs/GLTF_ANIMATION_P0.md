@@ -3,7 +3,8 @@
 The fork now loads a bounded rigged GLB and animates its skeleton inside Mapbox's
 native custom-layer pass: GLES on Android and Metal on iOS. Visible pose A/B
 captures passed on an Android emulator and iOS Simulator. This is one experimental
-model per map, sharing an exclusive slot with the cube probe.
+primary model per map, sharing an exclusive slot with the cube probe. A second
+independent companion slot is described below.
 
 ## Supported input
 
@@ -62,8 +63,13 @@ await probe.updateRiggedModel(NativeRiggedModelProbeUpdate(
 ));
 ```
 
-Coordinates and heading interpolate natively over 500 ms, including the short
-arc at the dateline/heading wrap. An omitted clip/rate preserves its value;
+Coordinates interpolate natively over 500 ms, including the dateline short arc.
+Heading has an independent shortest-arc clock with smooth acceleration and
+deceleration, lasting at least 500 ms and up to 1.5 s for a 180-degree reversal
+(peak 180 degrees/second). Position-only updates preserve an ongoing turn's
+clock; retargeting starts at the currently sampled angle. Initial attachment
+uses its requested heading, while fully hidden placement updates still snap
+before reveal. An omitted clip/rate preserves its value;
 GPS-only or playback-rate updates preserve accumulated animation time. Only a
 changed clip resets its clock. Paused animation can still render placement
 interpolation; an inactive application suspends native repaint work entirely.
@@ -163,3 +169,23 @@ rendering of all three clips, cached GPS/rate updates, clock/palette retention,
 style restoration and detach. Both Android emulator GLES and iOS Simulator
 Metal passed this gate. Home location ownership and speed-to-gait policy remain
 application responsibilities; this is still a single-model capability.
+
+## Independent following-Pet slot — 2026-10-21
+
+`MapboxMap.nativeCompanionModel` exposes a second bounded native actor through
+an optional `NativeCompanionModelProvider`. It uses the same GLB options,
+updates, readiness diagnostics and pause/detach API as the primary rigged probe.
+It never replaces the primary model/cube. iOS and Android reuse the existing
+host implementation with separate instance state, decode cancellation, GPU
+renderer, layer ID (`movey-following-pet-v1`) and channel suffix (`.companion`).
+Both hosts receive map disposal, style restoration and platform lifecycle events.
+There is no unbounded actor registry and no change to the existing Pigeon APIs.
+
+Native channel unit tests cover independent attach/pause/detach and disposal
+(16 tests including existing cube/model coverage). The Movey mobile app built
+successfully for Android dev APK and iOS Simulator with the local path overrides.
+`example/integration_test/native_companion_model_test.dart` checks simultaneous
+animation, independent pause/clip selection, style restore and companion detach.
+Its iOS execution is currently blocked before launch by CocoaPods/xcodeproj's
+unsupported example-project object version 70; no Android emulator was available.
+These results do not establish visible device output or FPS measurements.

@@ -129,6 +129,7 @@ class MapboxMapController(
   private val performanceStatisticsController: PerformanceStatisticsController
   private val mapRecorderController: MapRecorderController
   private val animatedEntitiesController: AnimatedEntitiesController
+  private val companionController: AnimatedEntitiesController
 
   private val eventHandler: MapboxEventHandler
 
@@ -218,6 +219,7 @@ class MapboxMapController(
     performanceStatisticsController = PerformanceStatisticsController(mapboxMap, this.messenger, this.channelSuffix)
     mapRecorderController = MapRecorderController(mapboxMap)
     animatedEntitiesController = AnimatedEntitiesController(mapView, mapboxMap, messenger, this.channelSuffix)
+    companionController = AnimatedEntitiesController(mapView, mapboxMap, messenger, this.channelSuffix, companion = true)
     changeUserAgent(pluginVersion)
 
     StyleManager.setUp(messenger, styleController, this.channelSuffix)
@@ -257,6 +259,7 @@ class MapboxMapController(
 
     onFlutterViewAttachedCalled = true
     animatedEntitiesController.onFlutterViewAttached(lifecycleProvider.getLifecycle())
+    companionController.onFlutterViewAttached(lifecycleProvider.getLifecycle())
 
     if (ownsMapView) {
       val context = flutterView.context
@@ -275,6 +278,7 @@ class MapboxMapController(
 
     onFlutterViewAttachedCalled = false
     animatedEntitiesController.onFlutterViewDetached()
+    companionController.onFlutterViewDetached()
 
     if (ownsMapView) {
       lifecycleHelper?.dispose()
@@ -289,6 +293,7 @@ class MapboxMapController(
     }
 
     animatedEntitiesController.dispose()
+    companionController.dispose()
     eventHandler.dispose()
     lifecycleHelper?.dispose()
     lifecycleHelper = null

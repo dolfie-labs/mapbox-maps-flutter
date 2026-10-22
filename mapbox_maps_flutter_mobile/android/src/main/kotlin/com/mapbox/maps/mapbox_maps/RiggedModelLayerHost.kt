@@ -76,7 +76,7 @@ internal class RiggedModelState(
       placement.set(snapped)
       settledPlacement.set(snapped)
     } else if (target != previousPlacement.to) {
-      placement.set(RiggedPlacementTransition(previousPlacement.sample(now), target, now))
+      placement.set(previousPlacement.retarget(target, now))
     }
     if (nextOpacity != null) opacity.update(nextOpacity, opacityTransitionMilliseconds, now)
     return changedClip
@@ -97,7 +97,7 @@ internal class RiggedModelState(
   fun samplePlacement(now: Long): RiggedPlacement {
     val transition = placement.get()
     val sampled = transition.sample(now)
-    if (now - transition.startedNanos >= PLACEMENT_DURATION_NANOS) settledPlacement.set(transition)
+    if (!transition.isMoving(now)) settledPlacement.set(transition)
     return sampled
   }
 
@@ -107,21 +107,6 @@ internal class RiggedModelState(
 }
 
 internal data class RiggedPlayback(val clipIndex: Int, val rate: Double, val seconds: Double)
-internal data class RiggedPlacement(val latitude: Double, val longitude: Double, val headingDegrees: Double)
-private const val PLACEMENT_DURATION_NANOS = 500_000_000L
-private data class RiggedPlacementTransition(val from: RiggedPlacement, val to: RiggedPlacement, val startedNanos: Long) {
-  fun sample(now: Long): RiggedPlacement {
-    if (startedNanos == 0L) return to
-    val fraction = ((now - startedNanos).toDouble() / PLACEMENT_DURATION_NANOS).coerceIn(0.0, 1.0)
-    val longitude = from.longitude + shortestArc(to.longitude - from.longitude) * fraction
-    return RiggedPlacement(
-      from.latitude + (to.latitude - from.latitude) * fraction,
-      ((longitude + 540.0) % 360.0) - 180.0,
-      ((from.headingDegrees + shortestArc(to.headingDegrees - from.headingDegrees) * fraction) % 360.0 + 360.0) % 360.0,
-    )
-  }
-  private fun shortestArc(value: Double): Double = ((value + 540.0) % 360.0) - 180.0
-}
 
 /** One real skinned mesh in Mapbox's render pass; no model/viewer surface. */
 internal class RiggedModelLayerHost(

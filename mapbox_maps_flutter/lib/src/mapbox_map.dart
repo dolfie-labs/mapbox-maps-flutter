@@ -67,6 +67,20 @@ base class MapboxMap extends StyleManager implements MapboxMapInterface {
     );
   }
 
+  /// Independent native actor for the current user's following Pet.
+  @experimental
+  late final NativeRiggedModelProbe nativeCompanionModel = _createCompanion();
+
+  NativeRiggedModelProbe _createCompanion() {
+    final implementation = _impl;
+    if (implementation is! NativeCompanionModelProvider) {
+      throw UnsupportedError('Native companion model is unavailable');
+    }
+    return NativeRiggedModelProbe(
+      (implementation as NativeCompanionModelProvider).nativeCompanionModel,
+    );
+  }
+
   /// Provides access to the map's style APIs.
   @Deprecated('Call style APIs on this map instance directly.')
   StyleManager get style => this;

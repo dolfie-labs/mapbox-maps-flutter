@@ -7,8 +7,9 @@ class _NativeCustomLayerProbeChannel
   _NativeCustomLayerProbeChannel({
     required int channelSuffix,
     required BinaryMessenger binaryMessenger,
+    String actorSuffix = '',
   }) : _channel = MethodChannel(
-         'dev.movey.mapbox.animated_entities.v1.$channelSuffix',
+         'dev.movey.mapbox.animated_entities.v1.$channelSuffix$actorSuffix',
          const StandardMethodCodec(),
          binaryMessenger,
        );

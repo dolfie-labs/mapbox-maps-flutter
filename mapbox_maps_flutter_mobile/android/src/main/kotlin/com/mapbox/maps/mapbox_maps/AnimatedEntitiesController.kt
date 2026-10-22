@@ -26,11 +26,14 @@ internal class AnimatedEntitiesController(
   private val mapboxMap: MapboxMap,
   messenger: BinaryMessenger,
   channelSuffix: String,
+  companion: Boolean = false,
 ) : MethodChannel.MethodCallHandler, DefaultLifecycleObserver {
 
+  private val layerId = if (companion) "movey-following-pet-v1" else "movey-animated-entities-p0-cube-v1"
+  private val actorSuffix = if (companion) ".companion" else ""
   private val channel = MethodChannel(
     messenger,
-    "dev.movey.mapbox.animated_entities.v1.$channelSuffix",
+    "dev.movey.mapbox.animated_entities.v1.$channelSuffix$actorSuffix",
   )
   private val cube = AtomicReference<AnimatedCubeState?>(null)
   private val rigged = AtomicReference<RiggedModelState?>(null)
@@ -397,18 +400,18 @@ internal class AnimatedEntitiesController(
     discardStaleHost()
     if (disposed || !hasActiveProbe() || !mapboxMap.isStyleLoaded()) return
     val style = mapboxMap.styleManager
-    if (style.styleLayerExists(LAYER_ID)) {
+    if (style.styleLayerExists(layerId)) {
       if (!ownsCurrentStyleHost()) throw CubeStyleException("STYLE_LAYER_ID_CONFLICT")
       return
     }
     val generation = styleGeneration.get()
     val model = rigged.get()
     val nextHost: ProbeGlesHost = if (model != null) RiggedModelLayerHost(rigged, model) else CubeCustomLayerHost(cube, renderedFrames)
-    val added = style.addStyleCustomLayer(LAYER_ID, nextHost, null)
+    val added = style.addStyleCustomLayer(layerId, nextHost, null)
     if (added.isError) throw CubeStyleException("STYLE_LAYER_ADD_FAILED")
     host = nextHost
     ownedHostStyleGeneration = generation
-    val positioned = style.setStyleLayerProperty(LAYER_ID, "slot", Value.valueOf("top"))
+    val positioned = style.setStyleLayerProperty(layerId, "slot", Value.valueOf("top"))
     if (positioned.isError) throw CubeStyleException("STYLE_LAYER_POSITION_FAILED")
     lastErrorCode = null
   }
@@ -419,8 +422,8 @@ internal class AnimatedEntitiesController(
     discardStaleHost()
     if (!ownsCurrentStyleHost() || !mapboxMap.isStyleLoaded()) return
     val style = mapboxMap.styleManager
-    if (style.styleLayerExists(LAYER_ID)) {
-      val removed = style.removeStyleLayer(LAYER_ID)
+    if (style.styleLayerExists(layerId)) {
+      val removed = style.removeStyleLayer(layerId)
       if (removed.isError) throw CubeStyleException("STYLE_LAYER_REMOVE_FAILED")
     }
     // GPU deletion belongs to CustomLayerHost.deinitialize, on the render thread.
@@ -434,7 +437,7 @@ internal class AnimatedEntitiesController(
         ?: (!paused && (cube.get()?.rotationDegreesPerSecond ?: 0.0) != 0.0)) &&
       lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) == true &&
       ownsCurrentStyleHost() && host?.lastErrorCode?.get() == null && lastErrorCode == null &&
-      mapboxMap.isStyleLoaded() && mapboxMap.styleManager.styleLayerExists(LAYER_ID)
+      mapboxMap.isStyleLoaded() && mapboxMap.styleManager.styleLayerExists(layerId)
 
   private fun updateRepaint() {
     if (canRepaint()) {
@@ -458,7 +461,7 @@ internal class AnimatedEntitiesController(
     "backend" to "androidGLES",
     "attached" to (cube.get() != null),
     "paused" to paused,
-    "styleLayerPresent" to mapboxMap.styleManager.styleLayerExists(LAYER_ID),
+    "styleLayerPresent" to mapboxMap.styleManager.styleLayerExists(layerId),
     "initialized" to (cube.get() != null && host is CubeCustomLayerHost && ownsCurrentStyleHost() && mapboxMap.isStyleLoaded() && host?.initialized?.get() == true),
     "repaintEnabled" to (cube.get() != null && host is CubeCustomLayerHost && canRepaint()),
     "renderedFrames" to renderedFrames.get(),
@@ -517,7 +520,6 @@ internal class AnimatedEntitiesController(
 
   private companion object {
     const val PROTOCOL_VERSION = 1
-    const val LAYER_ID = "movey-animated-entities-p0-cube-v1"
     const val MERCATOR_LATITUDE_LIMIT = 85.05112878
   }
 }

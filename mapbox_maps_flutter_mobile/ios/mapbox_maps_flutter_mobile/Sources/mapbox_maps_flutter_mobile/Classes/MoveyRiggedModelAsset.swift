@@ -237,34 +237,51 @@ struct MoveyRiggedPlacementTween {
     private(set) var to: MoveyRiggedPlacement
     private var started: Double
     private let duration = 0.5
+    private var headingFrom: Double
+    private var headingStarted: Double
+    private var headingDuration = 0.5
     private var suspendedAt: Double?
 
     init(_ placement: MoveyRiggedPlacement, now: Double) {
         from = placement; to = placement; started = now - duration
+        headingFrom = placement.headingDegrees; headingStarted = now - headingDuration
     }
     private func effectiveTime(_ now: Double) -> Double { suspendedAt ?? now }
-    func isMoving(now: Double) -> Bool { effectiveTime(now) < started + duration }
+    func isMoving(now: Double) -> Bool {
+        effectiveTime(now) < max(started + duration, headingStarted + headingDuration)
+    }
     func sample(now: Double) -> MoveyRiggedPlacement {
         let amount = min(1, max(0, (effectiveTime(now) - started) / duration))
-        if amount == 1 { return to }
         func y(_ latitude: Double) -> Double { asinh(tan(latitude * .pi / 180)) }
-        let latitude = atan(sinh(y(from.latitude) + (y(to.latitude) - y(from.latitude)) * amount)) * 180 / .pi
+        let latitude = amount == 1 ? to.latitude : atan(sinh(y(from.latitude) + (y(to.latitude) - y(from.latitude)) * amount)) * 180 / .pi
         let longitude = Self.wrapped(from.longitude + Self.shortArc(to.longitude - from.longitude) * amount)
-        let heading = Self.wrapped(from.headingDegrees + Self.shortArc(to.headingDegrees - from.headingDegrees) * amount)
+        let turn = min(1, max(0, (effectiveTime(now) - headingStarted) / headingDuration))
+        let eased = turn * turn * (3 - 2 * turn)
+        let heading = Self.wrapped(headingFrom + Self.shortArc(to.headingDegrees - headingFrom) * eased)
         return .init(latitude: latitude, longitude: longitude, headingDegrees: heading)
     }
     mutating func retarget(_ placement: MoveyRiggedPlacement, now: Double) {
         guard to.latitude != placement.latitude || Self.shortArc(to.longitude - placement.longitude) != 0 ||
                 Self.shortArc(to.headingDegrees - placement.headingDegrees) != 0 else { return }
-        from = sample(now: now); to = placement; started = effectiveTime(now)
+        let current = sample(now: now)
+        if Self.shortArc(to.headingDegrees - placement.headingDegrees) != 0 {
+            headingFrom = current.headingDegrees
+            headingStarted = effectiveTime(now)
+            // Smooth start/stop with a peak of 180 deg/s: a reversal takes 1.5s.
+            headingDuration = max(duration, abs(Self.shortArc(placement.headingDegrees - headingFrom)) / 120)
+        }
+        from = current; to = placement; started = effectiveTime(now)
     }
     mutating func setSuspended(_ value: Bool, now: Double) {
         if value, suspendedAt == nil { suspendedAt = now }
-        else if !value, let suspended = suspendedAt { started += max(0, now - suspended); suspendedAt = nil }
+        else if !value, let suspended = suspendedAt {
+            let elapsed = max(0, now - suspended)
+            started += elapsed; headingStarted += elapsed; suspendedAt = nil
+        }
     }
     private static func shortArc(_ value: Double) -> Double {
         var result = value.truncatingRemainder(dividingBy: 360)
-        if result > 180 { result -= 360 }
+        if result >= 180 { result -= 360 }
         if result < -180 { result += 360 }
         return result
     }
